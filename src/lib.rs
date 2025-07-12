@@ -71,6 +71,7 @@ enum StakingMessage {
     #[returns(u128)]
     GetUnstakeHeight { block: u128, tx: u128 },
 
+    /// Get the total staked blocks for an orbital
     #[opcode(510)]
     #[returns(u128)]
     GetTotalStakedBlocks { block: u128, tx: u128 },
@@ -78,12 +79,12 @@ enum StakingMessage {
 
 /// Implementation of Token trait
 impl Token for Staking {
-    /// Returns the name of the token collection
+    /// Returns the name of the token
     fn name(&self) -> String {
         String::from(CONTRACT_NAME)
     }
 
-    /// Returns the symbol of the token collection
+    /// Returns the symbol of the token
     fn symbol(&self) -> String {
         String::from(CONTRACT_SYMBOL)
     }
@@ -135,37 +136,51 @@ impl Staking {
 
         let claim_output = transaction
             .output
-            .get(1)
+            .get(0)
             .ok_or_else(|| anyhow!("no outputs"))?;
         let claim_addr = &claim_output.script_pubkey.as_bytes().to_vec();
+        let mut staked_alkane_ids = self.get_staked_orbital_ids_by_address(&claim_addr);
 
         for alkane in &context.incoming_alkanes.0 {
             if !self.verify_id_collection(&alkane.id) {
                 return Err(anyhow!("Alkane ID not verified"));
             }
 
+            let pointer_key = self.alkane_id_to_bytes(&alkane.id);
+            let already_staked = self
+                .stake_block_pointer()
+                .select(&pointer_key)
+                .get_value::<u128>();
+
+            if already_staked != 0 {
+                return Err(anyhow!(
+                    "Orbital {}:{} already staked at block {}",
+                    alkane.id.block,
+                    alkane.id.tx,
+                    already_staked
+                ));
+            }
+
             // Check if already staked
-            let mut staked_alkane_ids = self.get_staked_orbital_ids_by_address(&claim_addr);
             if staked_alkane_ids
                 .iter()
                 .any(|alkane_id| alkane_id.block == alkane.id.block && alkane_id.tx == alkane.id.tx)
             {
-                return Err(anyhow!("Orbital already staked"));
+                return Err(anyhow!("Orbital already in your stake list"));
             }
 
             // Add new orbital to existing list
             staked_alkane_ids.push(alkane.id.clone());
 
-            self.set_staked_by_address(&claim_addr, staked_alkane_ids)?;
-
+            // Set stake block pointer for this alkane
             self.stake_block_pointer()
                 .select(&self.alkane_id_to_bytes(&alkane.id))
                 .set_value(self.height());
         }
 
-        let response = CallResponse::forward(&context.incoming_alkanes);
+        self.set_staked_by_address(&claim_addr, staked_alkane_ids)?;
 
-        Ok(response)
+        Ok(CallResponse::default())
     }
 
     pub fn unstake(&self, block: u128, tx: u128) -> Result<CallResponse> {
@@ -174,9 +189,6 @@ impl Staking {
         if !self.verify_id_collection(&alkane_id) {
             return Err(anyhow!("Orbital ID not from {}", CONTRACT_NAME));
         }
-
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         // Get the address from the transaction
         let transaction: Transaction = consensus_decode(&mut Cursor::new(self.transaction()))
@@ -235,7 +247,12 @@ impl Staking {
             .total_staked_blocks_pointer()
             .select(&self.alkane_id_to_bytes(&alkane_id));
         let previous_total = total_pointer.get_value::<u128>();
-        total_pointer.set_value(previous_total + period_blocks);
+        let new_total = previous_total
+            .checked_add(period_blocks)
+            .ok_or_else(|| anyhow!("Total staked blocks overflow"))?;
+        total_pointer.set_value(new_total);
+
+        let mut response = CallResponse::default();
 
         response.alkanes.0.push(AlkaneTransfer {
             id: alkane_id,
@@ -294,20 +311,17 @@ impl Staking {
         let pointer = self.address_staked_pointer().select(&address_witness);
         let arc_bytes = pointer.get();
 
-        if arc_bytes.len() == 0 {
-            panic!("Stake not found for address witness");
+        if arc_bytes.is_empty() {
+            return Vec::new();
         }
 
-        let bytes = arc_bytes.as_ref();
-        let mut orbital_ids = Vec::new();
-
-        for chunk in bytes.chunks_exact(32) {
-            let block = u128::from_le_bytes(chunk[0..16].try_into().unwrap());
-            let tx = u128::from_le_bytes(chunk[16..32].try_into().unwrap());
-            orbital_ids.push(AlkaneId { block, tx });
-        }
-
-        orbital_ids
+        arc_bytes
+            .chunks_exact(32)
+            .map(|chunk| AlkaneId {
+                block: u128::from_le_bytes(chunk[0..16].try_into().unwrap()),
+                tx: u128::from_le_bytes(chunk[16..32].try_into().unwrap()),
+            })
+            .collect()
     }
 
     fn set_staked_by_address(&self, address: &Vec<u8>, alkane_ids: Vec<AlkaneId>) -> Result<()> {
@@ -332,12 +346,14 @@ impl Staking {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let alkane_id = AlkaneId { block, tx };
+        let eligible = self.verify_id_collection(&alkane_id)
+            && self
+                .stake_block_pointer()
+                .select(&self.alkane_id_to_bytes(&alkane_id))
+                .get_value::<u128>()
+                == 0;
 
-        if !self.verify_id_collection(&alkane_id) {
-            return Err(anyhow!("Orbital ID not from {}", CONTRACT_NAME));
-        }
-
-        response.data = vec![1];
+        response.data = vec![eligible as u8];
         Ok(response)
     }
 

@@ -117,12 +117,13 @@ oyl provider alkanes \
 Verify an Alkane ID:
 
 ```bash
-oyl provider alkanes simulate \
-  -params '{
-    "target": { "block": "2", "tx": "10" },
-    "inputs": ["506","2","615"]
-  }' \
-  -p oylnet
+oyl provider alkanes \
+-method simulate \
+-params '{
+  "target": { "block": "2", "tx": "10" },
+  "inputs": ["506", "2", "615"]
+}' \
+-p oylnet
 ```
 
 ```json
