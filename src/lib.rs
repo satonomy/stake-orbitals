@@ -66,15 +66,15 @@ enum StakingMessage {
     #[returns(String)]
     GetStakedByAddress { lo: u128, hi: u128 },
 
-    /// Get the unstake height (block number when unstaked)
-    #[opcode(509)]
-    #[returns(u128)]
-    GetUnstakeHeight { block: u128, tx: u128 },
-
     /// Get the total staked blocks for an orbital
     #[opcode(510)]
     #[returns(u128)]
     GetTotalStakedBlocks { block: u128, tx: u128 },
+
+    /// Get the total number of staked orbitals
+    #[opcode(511)]
+    #[returns(u128)]
+    GetTotalStaked,
 }
 
 /// Implementation of Token trait
@@ -127,40 +127,37 @@ impl Staking {
     pub fn stake(&self) -> Result<CallResponse> {
         let context = self.context()?;
 
-        let transaction: Transaction = consensus_decode(&mut Cursor::new(self.transaction()))
-            .map_err(|e| anyhow!("tx parse failed: {}", e))?;
-
         if context.incoming_alkanes.0.is_empty() {
             return Err(anyhow!("Must send at least 1 orbital to stake"));
         }
-
-        let claim_output = transaction
-            .output
-            .get(0)
-            .ok_or_else(|| anyhow!("no outputs"))?;
-        let claim_addr = &claim_output.script_pubkey.as_bytes().to_vec();
-        let mut staked_alkane_ids = self.get_staked_orbital_ids_by_address(&claim_addr);
 
         for alkane in &context.incoming_alkanes.0 {
             if !self.verify_id_collection(&alkane.id) {
                 return Err(anyhow!("Alkane ID not verified"));
             }
-
-            let pointer_key = self.alkane_id_to_bytes(&alkane.id);
-            let already_staked = self
-                .stake_block_pointer()
-                .select(&pointer_key)
-                .get_value::<u128>();
-
-            if already_staked != 0 {
+            let key = self.alkane_id_to_bytes(&alkane.id);
+            if self.stake_height_pointer().select(&key).get_value::<u128>() != 0 {
                 return Err(anyhow!(
-                    "Orbital {}:{} already staked at block {}",
+                    "Orbital {}:{} already staked",
                     alkane.id.block,
-                    alkane.id.tx,
-                    already_staked
+                    alkane.id.tx
                 ));
             }
+        }
 
+        let transaction: Transaction = consensus_decode(&mut Cursor::new(self.transaction()))
+            .map_err(|e| anyhow!("tx parse failed: {}", e))?;
+        let script = &transaction
+            .output
+            .get(0)
+            .ok_or_else(|| anyhow!("no outputs"))?
+            .script_pubkey;
+        let mut witness = script.as_bytes()[2..].to_vec();
+        witness.resize(32, 0);
+
+        let mut staked_alkane_ids = self.get_staked_orbital_ids_by_address(&witness);
+
+        for alkane in &context.incoming_alkanes.0 {
             // Check if already staked
             if staked_alkane_ids
                 .iter()
@@ -173,12 +170,18 @@ impl Staking {
             staked_alkane_ids.push(alkane.id.clone());
 
             // Set stake block pointer for this alkane
-            self.stake_block_pointer()
+            self.stake_height_pointer()
                 .select(&self.alkane_id_to_bytes(&alkane.id))
-                .set_value(self.height());
+                .set_value(u128::from(self.height())); // this should be u128
         }
 
-        self.set_staked_by_address(&claim_addr, staked_alkane_ids)?;
+        // Increment total staked count
+        let mut total_staked_pointer = self.total_staked_pointer();
+        let current_total = total_staked_pointer.get_value::<u128>();
+        total_staked_pointer
+            .set_value(current_total + u128::try_from(context.incoming_alkanes.0.len()).unwrap());
+
+        self.set_staked_by_address(&witness, staked_alkane_ids)?;
 
         Ok(CallResponse::default())
     }
@@ -193,14 +196,16 @@ impl Staking {
         // Get the address from the transaction
         let transaction: Transaction = consensus_decode(&mut Cursor::new(self.transaction()))
             .map_err(|e| anyhow!("tx parse failed: {}", e))?;
-        let claim_output = transaction
+        let script = &transaction
             .output
             .get(0)
-            .ok_or_else(|| anyhow!("no outputs"))?;
-        let claim_addr = &claim_output.script_pubkey.as_bytes().to_vec();
+            .ok_or_else(|| anyhow!("no outputs"))?
+            .script_pubkey;
+        let mut witness = script.as_bytes()[2..].to_vec();
+        witness.resize(32, 0);
 
         // Get current staked orbitals for this address
-        let mut staked_alkane_ids = self.get_staked_orbital_ids_by_address(claim_addr);
+        let mut staked_alkane_ids = self.get_staked_orbital_ids_by_address(&witness);
 
         // Check if the orbital is actually staked
         if !staked_alkane_ids
@@ -212,7 +217,7 @@ impl Staking {
 
         // Check if stake record exists
         let staked_at_block = self
-            .stake_block_pointer()
+            .stake_height_pointer()
             .select(&self.alkane_id_to_bytes(&alkane_id))
             .get_value::<u128>();
 
@@ -220,37 +225,35 @@ impl Staking {
             return Err(anyhow!("Orbital stake record not found"));
         }
 
-        let now = self.height();
-
         // Remove the specific orbital from the list
         staked_alkane_ids.retain(|staked_id| {
             !(staked_id.block == alkane_id.block && staked_id.tx == alkane_id.tx)
         });
 
         // Update the address storage with the filtered list
-        self.set_staked_by_address(claim_addr, staked_alkane_ids)?;
-
-        // Save the unstake height
-        self.unstake_height_pointer()
-            .select(&self.alkane_id_to_bytes(&alkane_id))
-            .set_value(self.height());
+        self.set_staked_by_address(&witness, staked_alkane_ids)?;
 
         // Clean the stake height record
         let mut stake_pointer = self
-            .stake_block_pointer()
+            .stake_height_pointer()
             .select(&self.alkane_id_to_bytes(&alkane_id));
         stake_pointer.nullify();
 
-        let period_blocks = u128::from(now) - staked_at_block;
+        let period_blocks = u128::from(self.height()).saturating_sub(staked_at_block);
 
-        let mut total_pointer = self
+        let mut total_staked_blocks_pointer = self
             .total_staked_blocks_pointer()
             .select(&self.alkane_id_to_bytes(&alkane_id));
-        let previous_total = total_pointer.get_value::<u128>();
+        let previous_total = total_staked_blocks_pointer.get_value::<u128>();
         let new_total = previous_total
             .checked_add(period_blocks)
             .ok_or_else(|| anyhow!("Total staked blocks overflow"))?;
-        total_pointer.set_value(new_total);
+        total_staked_blocks_pointer.set_value(new_total);
+
+        // Decrement total staked count
+        let mut total_staked_pointer = self.total_staked_pointer();
+        let current_total = total_staked_pointer.get_value::<u128>();
+        total_staked_pointer.set_value(current_total.saturating_sub(1));
 
         let mut response = CallResponse::default();
 
@@ -271,12 +274,12 @@ impl Staking {
             return Err(anyhow!("Orbital ID not from {}", CONTRACT_NAME));
         }
 
-        let total_blocks = self
+        let total_staked_blocks = self
             .total_staked_blocks_pointer()
             .select(&self.alkane_id_to_bytes(&alkane_id))
             .get_value::<u128>();
 
-        response.data = total_blocks.to_le_bytes().to_vec();
+        response.data = total_staked_blocks.to_le_bytes().to_vec();
         Ok(response)
     }
 
@@ -284,22 +287,20 @@ impl Staking {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let mut address_witness = Vec::with_capacity(32);
-        address_witness.extend_from_slice(&hi.to_le_bytes());
-        address_witness.extend_from_slice(&lo.to_le_bytes());
-        while address_witness.last() == Some(&0) {
-            address_witness.pop(); // trim padding zeros
-        }
+        let mut witness = Vec::with_capacity(32);
+        witness.extend_from_slice(&hi.to_le_bytes());
+        witness.extend_from_slice(&lo.to_le_bytes());
+        witness.resize(32, 0);
 
-        let orbital_ids = self.get_staked_orbital_ids_by_address(&address_witness);
+        let orbital_ids = self.get_staked_orbital_ids_by_address(&witness);
         let mut staked_ids = Vec::new();
         for id in orbital_ids {
             staked_ids.push(format!("{}:{}", id.block, id.tx));
         }
 
-        // if no ids, return empty
+        // if no ids, return error
         if staked_ids.is_empty() {
-            return Ok(response);
+            return Err(anyhow!("No orbitals staked"));
         }
 
         response.data = staked_ids.join(",").into_bytes();
@@ -340,7 +341,6 @@ impl Staking {
     }
 
     /// Check if an orbital is eligible to be staked.
-    /// Example: alkane_str = "2:4121" returns 1 if eligible, error if not
     pub fn get_stake_eligibility(&self, block: u128, tx: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
@@ -348,7 +348,7 @@ impl Staking {
         let alkane_id = AlkaneId { block, tx };
         let eligible = self.verify_id_collection(&alkane_id)
             && self
-                .stake_block_pointer()
+                .stake_height_pointer()
                 .select(&self.alkane_id_to_bytes(&alkane_id))
                 .get_value::<u128>()
                 == 0;
@@ -368,7 +368,7 @@ impl Staking {
         }
         let alkane_id_bytes = self.alkane_id_to_bytes(&alkane_id);
         let staked_at_block = self
-            .stake_block_pointer()
+            .stake_height_pointer()
             .select(&alkane_id_bytes)
             .get_value::<u128>();
         if staked_at_block == 0 {
@@ -380,59 +380,43 @@ impl Staking {
         Ok(response)
     }
 
-    pub fn get_unstake_height(&self, block: u128, tx: u128) -> Result<CallResponse> {
+    pub fn get_total_staked(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let alkane_id = AlkaneId { block, tx };
-
-        if !self.verify_id_collection(&alkane_id) {
-            return Err(anyhow!("Orbital ID not from {}", CONTRACT_NAME));
-        }
-
-        let alkane_id_bytes = self.alkane_id_to_bytes(&alkane_id);
-        let unstake_height = self
-            .unstake_height_pointer()
-            .select(&alkane_id_bytes)
-            .get_value::<u128>();
-
-        if unstake_height == 0 {
-            return Err(anyhow!("Orbital has not been unstaked"));
-        }
-
-        response.data = unstake_height.to_le_bytes().to_vec();
+        let total_staked = self.total_staked_pointer().get_value::<u128>();
+        response.data = total_staked.to_le_bytes().to_vec();
 
         Ok(response)
     }
 
-    fn alkane_id_to_bytes(&self, alkane_id: &AlkaneId) -> Vec<u8> {
+    pub fn alkane_id_to_bytes(&self, alkane_id: &AlkaneId) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(32);
         bytes.extend_from_slice(&alkane_id.block.to_le_bytes());
         bytes.extend_from_slice(&alkane_id.tx.to_le_bytes());
         bytes
     }
 
-    fn verify_id_collection(&self, orbital_id: &AlkaneId) -> bool {
+    pub fn verify_id_collection(&self, orbital_id: &AlkaneId) -> bool {
         orbital_id.block == BEEP_BOOP_BLOCK && BEEP_BOOP_IDS.contains(&orbital_id.tx)
     }
 
     /// Get storage pointer for stake height records
-    fn stake_block_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/stake-blocks")
+    pub fn stake_height_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/stake-height")
     }
 
     /// Get storage pointer for address-to-staked-orbital mapping
-    fn address_staked_pointer(&self) -> StoragePointer {
+    pub fn address_staked_pointer(&self) -> StoragePointer {
         StoragePointer::from_keyword("/address-staked-pointer")
     }
 
-    /// Get storage pointer for unstake height records
-    fn unstake_height_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/unstake-heights")
+    pub fn total_staked_blocks_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/total-staked-blocks")
     }
 
-    fn total_staked_blocks_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/total-staked-blocks")
+    pub fn total_staked_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/total-staked")
     }
 }
 
