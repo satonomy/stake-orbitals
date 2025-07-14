@@ -237,7 +237,7 @@ impl Staking {
         let mut stake_pointer = self
             .stake_height_pointer()
             .select(&self.alkane_id_to_bytes(&alkane_id));
-        stake_pointer.nullify();
+        stake_pointer.set_value(0u128);
 
         let period_blocks = u128::from(self.height()).saturating_sub(staked_at_block);
 
