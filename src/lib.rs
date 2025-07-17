@@ -203,21 +203,22 @@ impl Staking {
                 .select(&self.alkane_id_to_bytes(&alkane.id))
                 .set_value(u128::from(self.height())); // this should be u128
 
-            let minted_alkane = self
+            let minted_lp_id = self
                 .instances_pointer()
                 .select(&index.to_le_bytes().to_vec())
                 .get();
 
-            let bytes = minted_alkane.as_ref();
+            let minted_lp_id_bytes = minted_lp_id.as_ref();
 
-            if bytes.is_empty() {
+            if minted_lp_id_bytes.is_empty() {
                 let minted = self.create_mint_transfer(index)?;
                 minted_lp_orbitals.push(minted);
-                self.set_staked_by_id(&self.alkane_id_to_bytes(&minted.id), alkane.id)?;
+                let minted_lp_id_bytes = self.alkane_id_to_bytes(&minted.id);
+                self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
             } else {
                 let existing_alkane_id = AlkaneId {
-                    block: u128::from_le_bytes(minted_alkane[0..16].try_into().unwrap()),
-                    tx: u128::from_le_bytes(minted_alkane[16..32].try_into().unwrap()),
+                    block: u128::from_le_bytes(minted_lp_id_bytes[0..16].try_into().unwrap()),
+                    tx: u128::from_le_bytes(minted_lp_id_bytes[16..32].try_into().unwrap()),
                 };
 
                 let existing_alkane = AlkaneTransfer {
@@ -226,7 +227,7 @@ impl Staking {
                 };
                 minted_lp_orbitals.push(existing_alkane.clone());
 
-                self.set_staked_by_id(&bytes, alkane.id)?;
+                self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
             };
         }
 
@@ -277,10 +278,12 @@ impl Staking {
             .select(&lp_alkane_id_key)
             .set(Arc::new(vec![]));
 
-        // decrement current staked count
-        let mut current_staked_pointer = self.current_staked_pointer();
-        let current_total = current_staked_pointer.get_value::<u128>();
-        current_staked_pointer.set_value(current_total.saturating_sub(1));
+        let total_unstaked_pointer = self.total_unstaked_pointer().get_value::<u128>();
+        total_unstaked_pointer
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Total unstaked overflow"))?;
+        self.total_unstaked_pointer()
+            .set_value(total_unstaked_pointer);
 
         let mut response = CallResponse::default();
         response.alkanes.0.push(AlkaneTransfer {
@@ -341,8 +344,8 @@ impl Staking {
         Ok(response)
     }
 
-    fn set_staked_by_id(&self, key: &Vec<u8>, alkane_id: AlkaneId) -> Result<()> {
-        let mut staked_pointer = self.staked_id_pointer().select(&key);
+    fn set_staked_by_id(&self, minted_lp_id_bytes: &Vec<u8>, alkane_id: AlkaneId) -> Result<()> {
+        let mut staked_pointer = self.staked_id_pointer().select(&minted_lp_id_bytes);
         let alkane_id_bytes = self.alkane_id_to_bytes(&alkane_id);
         staked_pointer.set(Arc::new(alkane_id_bytes));
         Ok(())
@@ -583,8 +586,8 @@ impl Staking {
         StoragePointer::from_keyword("/total-staked")
     }
 
-    pub fn current_staked_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/current-staked")
+    pub fn total_unstaked_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/total-unstaked")
     }
 }
 
