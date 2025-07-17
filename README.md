@@ -16,7 +16,7 @@ cargo build --target wasm32-unknown-unknown --release
 oyl alkane new-contract \
   -c ./target/alkanes/wasm32-unknown-unknown/release/alkanes_stake.wasm \
   -data 1,0 \
-  -p oylnet
+  -p bitcoin
 ```
 
 **Sample response:**
@@ -39,29 +39,55 @@ oyl alkane new-contract \
 oyl provider alkanes \
   --method trace \
   -params '{
-    "txid":"c772fc3f70c489401951c07cc8e640f95e4532a4164f6f221035d4997b182dc7",
-    "vout":3
+    "txid":"03202af3341e8fcd734ea7d273a815a4419e42655358a47c51b346b776a2593e",
+    "vout":4
   }' \
-  -p oylnet
+  -p bitcoin
 ```
 
 **Example output:**
 
 ```json
 [
-  { "event": "create", "data": { "block": "0x2", "tx": "0xa" } },
+  {
+    "event": "create",
+    "data": {
+      "block": "0x2",
+      "tx": "0xddf2"
+    }
+  },
   {
     "event": "invoke",
     "data": {
       "type": "call",
       "context": {
-        "myself": { "block": "0x2", "tx": "0xa" },
-        "caller": { "block": "0x0", "tx": "0x0" },
-        "inputs": ["0x0", "..."],
+        "myself": {
+          "block": "0x2",
+          "tx": "0xddf2"
+        },
+        "caller": {
+          "block": "0x0",
+          "tx": "0x0"
+        },
+        "inputs": [
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0",
+          "0x0"
+        ],
         "incomingAlkanes": [],
         "vout": 3
       },
-      "fuel": 3500000
+      "fuel": 153119735
     }
   },
   {
@@ -69,9 +95,22 @@ oyl provider alkanes \
     "data": {
       "status": "success",
       "response": {
-        "alkanes": [{ "id": { "block": "0x2", "tx": "0xa" }, "value": "0x1" }],
+        "alkanes": [
+          {
+            "id": {
+              "block": "0x2",
+              "tx": "0xddf2"
+            },
+            "value": "0x1"
+          }
+        ],
         "data": "0x",
-        "storage": [{ "key": "/initialized", "value": "0x01" }]
+        "storage": [
+          {
+            "key": "/initialized",
+            "value": "0x01"
+          }
+        ]
       }
     }
   }
