@@ -193,15 +193,6 @@ impl Staking {
 
         let mut minted_lp_orbitals = Vec::new();
 
-        // let mocked_alkanes_transfer = vec![AlkaneTransfer {
-        //     id: AlkaneId {
-        //         block: 4,
-        //         tx: 16802,
-        //     },
-        //     value: 1,
-        // }];
-
-        // for alkane in &mocked_alkanes_transfer {
         for alkane in &context.incoming_alkanes.0 {
             if alkane.value != 1 {
                 return Err(anyhow!("Alkane amount must be 1"));
@@ -231,7 +222,12 @@ impl Staking {
             if minted_lp_id.len() == 0 {
                 let minted = self.create_mint_transfer(index)?;
                 minted_lp_orbitals.push(minted);
-                self.set_staked_by_id(&self.alkane_id_to_bytes(&minted.id), alkane.id)?;
+
+                let mut staked_pointer = self
+                    .staked_id_pointer()
+                    .select(&self.alkane_id_to_bytes(&minted.id));
+
+                staked_pointer.set(Arc::new(self.alkane_id_to_bytes(&alkane.id)));
             } else {
                 let minted_lp_id_bytes = minted_lp_id.as_ref();
 
@@ -246,7 +242,8 @@ impl Staking {
                 };
                 minted_lp_orbitals.push(existing_alkane.clone());
 
-                self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
+                // no need to set staked by id, because it's already added
+                // self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
             };
         }
 
@@ -279,19 +276,6 @@ impl Staking {
         if context.incoming_alkanes.0[0].value != 1 {
             return Err(anyhow!("LP token amount must be 1"));
         }
-        // let index_key = 0u128.to_le_bytes().to_vec();
-        // let first_lp_id_bytes_arc = self.instances_pointer().select(&index_key).get();
-
-        // if first_lp_id_bytes_arc.len() == 0 {
-        //     return Err(anyhow!("No LP token found at index 0"));
-        // }
-
-        // let bytes = first_lp_id_bytes_arc.as_ref();
-        // if 0 return error
-
-        // let first_incoming_alkane_id = AlkaneId { block: 2, tx: 53 };
-
-        // let first_incoming_alkane_id = AlkaneId { block: 2, tx: 41 };
 
         let first_incoming_alkane_id = context.incoming_alkanes.0[0].id;
         let lp_alkane_id_key = self.alkane_id_to_bytes(&first_incoming_alkane_id);
@@ -364,7 +348,7 @@ impl Staking {
             tx: sequence,
         };
 
-        self.add_instance(&orbital_id)?;
+        self.add_instance(&orbital_id, &index)?;
 
         if response.alkanes.0.len() < 1 {
             Err(anyhow!("orbital token not returned with factory"))
@@ -433,24 +417,12 @@ impl Staking {
         Ok(response)
     }
 
-    fn set_staked_by_id(&self, minted_lp_id_bytes: &Vec<u8>, alkane_id: AlkaneId) -> Result<()> {
-        let mut staked_pointer = self.staked_id_pointer().select(&minted_lp_id_bytes);
-        let alkane_id_bytes = self.alkane_id_to_bytes(&alkane_id);
-        staked_pointer.set(Arc::new(alkane_id_bytes));
-        Ok(())
-    }
-
     /// Check if an orbital is eligible to be staked.
     pub fn get_stake_eligibility(&self, block: u128, tx: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let alkane_id = AlkaneId { block, tx };
-        // let eligible = self
-        //     .stake_height_pointer()
-        //     .select(&self.alkane_id_to_bytes(&alkane_id))
-        //     .get_value::<u128>()
-        //     == 0;
         let eligible = self.verify_id_collection(&alkane_id)
             && self
                 .stake_height_pointer()
@@ -623,7 +595,7 @@ impl Staking {
         orbital_id.block == BEEP_BOOP_BLOCK && BEEP_BOOP_IDS.contains(&orbital_id.tx)
     }
 
-    fn add_instance(&self, instance_id: &AlkaneId) -> Result<u128> {
+    fn add_instance(&self, instance_id: &AlkaneId, index: &u128) -> Result<u128> {
         let count = self.instances_count();
         let new_count = count.checked_add(1).ok_or_else(|| anyhow!("Minted out"))?;
 
@@ -631,7 +603,7 @@ impl Staking {
         bytes.extend_from_slice(&instance_id.block.to_le_bytes());
         bytes.extend_from_slice(&instance_id.tx.to_le_bytes());
 
-        let bytes_vec = new_count.to_le_bytes().to_vec();
+        let bytes_vec = index.to_le_bytes().to_vec();
         let mut instance_pointer = self.instances_pointer().select(&bytes_vec);
         instance_pointer.set(Arc::new(bytes));
 
