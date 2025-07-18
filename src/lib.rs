@@ -1,3 +1,6 @@
+use image::{self, imageops, DynamicImage, ImageFormat, RgbaImage};
+use std::io::Cursor;
+
 use alkanes_runtime::{
     declare_alkane, message::MessageDispatch, runtime::AlkaneResponder, storage::StoragePointer,
     token::Token,
@@ -16,11 +19,11 @@ use orbitals_ids::BEEP_BOOP_IDS;
 
 const ORBITAL_TEMPLATE_ID: u128 = 111115;
 const MAX_MINTS: u128 = 10000;
-
 const BEEP_BOOP_BLOCK: u128 = 0x2;
 const BEEP_BOOP_COLLECTION_ID: u128 = 0x2222;
 const CONTRACT_NAME: &str = "Staked Beep Boop";
 const CONTRACT_SYMBOL: &str = "Beep Boop";
+const OVERLAY_BYTES: &[u8] = include_bytes!("../assets/overlay.png");
 
 #[derive(Default)]
 pub struct Staking(());
@@ -187,6 +190,10 @@ impl Staking {
         let mut minted_lp_orbitals = Vec::new();
 
         for alkane in &context.incoming_alkanes.0 {
+            if alkane.value != 1 {
+                return Err(anyhow!("Alkane amount must be 1"));
+            }
+
             // call GetNftIndex 999
             let cellpack = Cellpack {
                 target: alkane.id,
@@ -213,8 +220,7 @@ impl Staking {
             if minted_lp_id_bytes.is_empty() {
                 let minted = self.create_mint_transfer(index)?;
                 minted_lp_orbitals.push(minted);
-                let minted_lp_id_bytes = self.alkane_id_to_bytes(&minted.id);
-                self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
+                self.set_staked_by_id(&self.alkane_id_to_bytes(&minted.id), alkane.id)?;
             } else {
                 let existing_alkane_id = AlkaneId {
                     block: u128::from_le_bytes(minted_lp_id_bytes[0..16].try_into().unwrap()),
@@ -436,24 +442,33 @@ impl Staking {
     }
 
     fn get_data(&self, index: u128) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        let ctx = self.context()?;
+        let mut response = CallResponse::forward(&ctx.incoming_alkanes);
 
-        let collection_id = AlkaneId {
-            block: BEEP_BOOP_BLOCK,
-            tx: BEEP_BOOP_COLLECTION_ID,
-        };
-
-        let cellpack = Cellpack {
-            target: collection_id,
+        // ── fetch base PNG from Beep-Boop collection ──
+        let cell = Cellpack {
+            target: AlkaneId {
+                block: BEEP_BOOP_BLOCK,
+                tx: BEEP_BOOP_COLLECTION_ID,
+            },
             inputs: vec![1000, index],
         };
+        let base_png = self
+            .staticcall(&cell, &AlkaneTransferParcel::default(), self.fuel())?
+            .data;
 
-        let call_response =
-            self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
+        // decode both images
+        let mut base: RgbaImage = image::load_from_memory(&base_png)?.to_rgba8();
+        let overlay: RgbaImage = image::load_from_memory(OVERLAY_BYTES)?.to_rgba8();
 
-        response.data = call_response.data;
+        // composite (no resize needed)
+        imageops::overlay(&mut base, &overlay, 0, 0);
 
+        // re-encode
+        let mut out = Vec::new();
+        DynamicImage::ImageRgba8(base).write_to(&mut Cursor::new(&mut out), ImageFormat::Png)?;
+
+        response.data = out;
         Ok(response)
     }
 

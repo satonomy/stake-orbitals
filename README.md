@@ -39,7 +39,7 @@ oyl alkane new-contract \
 oyl provider alkanes \
   --method trace \
   -params '{
-    "txid":"c772fc3f70c489401951c07cc8e640f95e4532a4164f6f221035d4997b182dc7",
+    "txid":"67ad5d9c86b9d0b6c924074611c45d4c6db60c5a631e7b14908df4089c223078",
     "vout":3
   }' \
   -p oylnet
@@ -95,7 +95,7 @@ Fetch contract metadata:
 ```bash
 oyl provider alkanes \
   --method getAlkaneById \
-  -params '{"block":"2","tx":"10"}' \
+  -params '{"block":"2","tx":"89"}' \
   -p oylnet
 ```
 
