@@ -21,9 +21,12 @@ const ORBITAL_TEMPLATE_ID: u128 = 16802;
 const MAX_MINTS: u128 = 10000;
 const BEEP_BOOP_BLOCK: u128 = 2;
 const BEEP_BOOP_COLLECTION_ID: u128 = 31064;
-const CONTRACT_NAME: &str = "🖨️ Boop Quantum Vault";
-const CONTRACT_SYMBOL: &str = "Beep Boop Orbiting";
-const OVERLAY_BYTES: &[u8] = include_bytes!("../assets/overlay.png");
+const CONTRACT_NAME: &str = "Boop Quantum Vault";
+const CONTRACT_SYMBOL: &str = "🖨️ Beep Boop Staking";
+const OVERLAY_BLUE_BYTES: &[u8] = include_bytes!("../assets/Blue.png");
+const OVERLAY_GLITCH_BYTES: &[u8] = include_bytes!("../assets/Glitch.png");
+const OVERLAY_GREEN_BYTES: &[u8] = include_bytes!("../assets/Green.png");
+const OVERLAY_PINK_BYTES: &[u8] = include_bytes!("../assets/Pink.png");
 
 #[derive(Default)]
 pub struct Staking(());
@@ -85,6 +88,11 @@ enum StakingMessage {
     #[opcode(508)]
     #[returns(String)]
     GetStakedByLp { block: u128, tx: u128 },
+
+    /// get rewards
+    #[opcode(509)]
+    #[returns(u128)]
+    GetRewards { block: u128, tx: u128 },
 
     /// Get the total staked blocks for an orbital
     #[opcode(510)]
@@ -192,6 +200,7 @@ impl Staking {
         }
 
         let mut minted_lp_orbitals = Vec::new();
+        let mut newly_staked_count = 0u128;
 
         for alkane in &context.incoming_alkanes.0 {
             if alkane.value != 1 {
@@ -222,6 +231,7 @@ impl Staking {
             if minted_lp_id.len() == 0 {
                 let minted = self.create_mint_transfer(index)?;
                 minted_lp_orbitals.push(minted);
+                newly_staked_count += 1;
 
                 let mut staked_pointer = self
                     .staked_id_pointer()
@@ -241,17 +251,17 @@ impl Staking {
                     value: 1u128,
                 };
                 minted_lp_orbitals.push(existing_alkane.clone());
+                newly_staked_count += 1;
 
                 // no need to set staked by id, because it's already added
                 // self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
             };
         }
 
-        // Increment total staked count
+        // Increment total staked count only by newly staked orbitals
         let mut total_staked_pointer = self.total_staked_pointer();
         let current_total = total_staked_pointer.get_value::<u128>();
-        total_staked_pointer
-            .set_value(current_total + u128::try_from(context.incoming_alkanes.0.len()).unwrap());
+        total_staked_pointer.set_value(current_total + newly_staked_count);
 
         // clean incoming alkanes set as default
         let mut response = CallResponse::default();
@@ -279,7 +289,7 @@ impl Staking {
 
         let first_incoming_alkane_id = context.incoming_alkanes.0[0].id;
         let lp_alkane_id_key = self.alkane_id_to_bytes(&first_incoming_alkane_id);
-        let staked_alkane_id = self.get_staked_orbital_id_by_lp_id(&lp_alkane_id_key);
+        let staked_alkane_id = self.get_staked_orbital_id_by_lp_id(&lp_alkane_id_key)?;
 
         let staked_at_block = self
             .stake_height_pointer()
@@ -305,9 +315,6 @@ impl Staking {
         self.stake_height_pointer()
             .select(&self.alkane_id_to_bytes(&staked_alkane_id))
             .set_value(0u128);
-        self.staked_id_pointer()
-            .select(&lp_alkane_id_key)
-            .set(Arc::new(vec![]));
 
         // Fix: Properly increment the total unstaked counter
         let total_unstaked_current = self.total_unstaked_pointer().get_value::<u128>();
@@ -375,12 +382,12 @@ impl Staking {
         Ok(response)
     }
 
-    fn get_staked_orbital_id_by_lp_id(&self, key: &Vec<u8>) -> AlkaneId {
+    fn get_staked_orbital_id_by_lp_id(&self, key: &Vec<u8>) -> Result<AlkaneId> {
         let pointer = self.staked_id_pointer().select(key);
         let data = pointer.get();
 
         if data.len() == 0 {
-            panic!("Beep Boop LP ID not found");
+            return Err(anyhow!("Beep Boop LP ID not found"));
         }
 
         let bytes = data.as_ref();
@@ -390,7 +397,7 @@ impl Staking {
             tx: u128::from_le_bytes(bytes[16..32].try_into().unwrap()),
         };
 
-        alkane_id
+        Ok(alkane_id)
     }
 
     fn get_staked_by_lp(&self, block: u128, tx: u128) -> Result<CallResponse> {
@@ -413,6 +420,56 @@ impl Staking {
         );
 
         response.data = alkane_id_string.into_bytes();
+
+        Ok(response)
+    }
+
+    fn get_rewards(&self, block: u128, tx: u128) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        let staked_alkane_id;
+
+        if !self.verify_id_collection(&AlkaneId { block, tx }) {
+            let pointer = self
+                .staked_id_pointer()
+                .select(&self.alkane_id_to_bytes(&AlkaneId { block, tx }));
+            let arc_bytes = pointer.get();
+
+            if arc_bytes.len() == 0 {
+                return Err(anyhow!("LP token has no staked orbital"));
+            }
+
+            staked_alkane_id = AlkaneId {
+                block: u128::from_le_bytes(arc_bytes[0..16].try_into().unwrap()),
+                tx: u128::from_le_bytes(arc_bytes[16..32].try_into().unwrap()),
+            };
+        } else {
+            staked_alkane_id = AlkaneId { block, tx };
+        }
+
+        let alkane_id_bytes = self.alkane_id_to_bytes(&staked_alkane_id);
+
+        let total_staked_blocks = self
+            .total_staked_blocks_pointer()
+            .select(&alkane_id_bytes)
+            .get_value::<u128>();
+
+        let staked_at_block = self
+            .stake_height_pointer()
+            .select(&alkane_id_bytes)
+            .get_value::<u128>();
+
+        let mut rewards = total_staked_blocks;
+
+        if staked_at_block != 0 {
+            let period_blocks = u128::from(self.height()).saturating_sub(staked_at_block);
+            rewards = rewards
+                .checked_add(period_blocks)
+                .ok_or_else(|| anyhow!("Total staked blocks overflow"))?;
+        }
+
+        response.data = rewards.to_le_bytes().to_vec();
 
         Ok(response)
     }
@@ -511,6 +568,17 @@ impl Staking {
         MAX_MINTS
     }
 
+    /// Select overlay image based on index (deterministic but appears random)
+    fn select_overlay_bytes(&self, index: u128) -> &'static [u8] {
+        match index % 4 {
+            0 => OVERLAY_BLUE_BYTES,
+            1 => OVERLAY_GLITCH_BYTES,
+            2 => OVERLAY_GREEN_BYTES,
+            3 => OVERLAY_PINK_BYTES,
+            _ => unreachable!(), // This should never happen with modulo 4
+        }
+    }
+
     fn get_data(&self, index: u128) -> Result<CallResponse> {
         let ctx = self.context()?;
         let mut response = CallResponse::forward(&ctx.incoming_alkanes);
@@ -530,7 +598,8 @@ impl Staking {
 
         // decode both images
         let mut base: RgbaImage = image::load_from_memory(&base_png)?.to_rgba8();
-        let overlay: RgbaImage = image::load_from_memory(OVERLAY_BYTES)?.to_rgba8();
+        let overlay: RgbaImage =
+            image::load_from_memory(self.select_overlay_bytes(index))?.to_rgba8();
 
         // Get overlay dimensions
         let (overlay_width, overlay_height) = overlay.dimensions();
