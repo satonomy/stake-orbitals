@@ -91,7 +91,7 @@ cargo build --target wasm32-unknown-unknown --release
 oyl alkane new-contract \
   -c ./target/alkanes/wasm32-unknown-unknown/release/alkanes_stake.wasm \
   -data 1,0 \
-  -p bitcoin -feeRate 1
+  -p bitcoin
 ```
 
 **Sample response:**

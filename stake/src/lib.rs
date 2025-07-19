@@ -21,8 +21,8 @@ const ORBITAL_TEMPLATE_ID: u128 = 16802;
 const MAX_MINTS: u128 = 10000;
 const BEEP_BOOP_BLOCK: u128 = 2;
 const BEEP_BOOP_COLLECTION_ID: u128 = 31064;
-const CONTRACT_NAME: &str = "Boop Quantum Vault";
-const CONTRACT_SYMBOL: &str = "🖨️ Beep Boop Staking";
+const CONTRACT_NAME: &str = "Beep Boop Intergalactic";
+const CONTRACT_SYMBOL: &str = "🖨️";
 const OVERLAY_BLUE_BYTES: &[u8] = include_bytes!("../assets/Blue.png");
 const OVERLAY_GLITCH_BYTES: &[u8] = include_bytes!("../assets/Glitch.png");
 const OVERLAY_GREEN_BYTES: &[u8] = include_bytes!("../assets/Green.png");
@@ -252,9 +252,6 @@ impl Staking {
                 };
                 minted_lp_orbitals.push(existing_alkane.clone());
                 newly_staked_count += 1;
-
-                // no need to set staked by id, because it's already added
-                // self.set_staked_by_id(&minted_lp_id_bytes, alkane.id)?;
             };
         }
 
@@ -434,15 +431,16 @@ impl Staking {
             let pointer = self
                 .staked_id_pointer()
                 .select(&self.alkane_id_to_bytes(&AlkaneId { block, tx }));
-            let arc_bytes = pointer.get();
+            let staked_id = pointer.get();
 
-            if arc_bytes.len() == 0 {
+            if staked_id.len() == 0 {
                 return Err(anyhow!("LP token has no staked orbital"));
             }
+            let staked_id_bytes = staked_id.as_ref();
 
             staked_alkane_id = AlkaneId {
-                block: u128::from_le_bytes(arc_bytes[0..16].try_into().unwrap()),
-                tx: u128::from_le_bytes(arc_bytes[16..32].try_into().unwrap()),
+                block: u128::from_le_bytes(staked_id_bytes[0..16].try_into().unwrap()),
+                tx: u128::from_le_bytes(staked_id_bytes[16..32].try_into().unwrap()),
             };
         } else {
             staked_alkane_id = AlkaneId { block, tx };
