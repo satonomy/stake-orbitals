@@ -2,8 +2,8 @@
 name = "alkanes-nft"
 version = "0.1.0"
 edition = "2021"
-description = "iDclub"
-authors = ["iDclub"]
+description = "satonomy"
+authors = ["satonomy"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
