@@ -1,4 +1,4 @@
-# Alkane Pandas Child
+# Beep Boop Intergalatic
 
 A factory contract used by the Alkanes collection contract for creating individual Alkanes NFT.
 
