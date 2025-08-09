@@ -24,6 +24,7 @@ const MAX_SUPPLY: u128 = 250000000;
 
 // Stake contract opcodes that we need to call
 const STAKE_GET_ELIGIBILITY: u128 = 506;
+const STAKE_GET_STAKED_HEIGHT: u128 = 507;
 const STAKE_GET_STAKED_BY_LP: u128 = 508;
 const STAKE_GET_TOTAL_STAKED_BLOCKS: u128 = 510;
 const STAKE_GET_TOTAL_STAKED: u128 = 511;
@@ -102,7 +103,6 @@ enum ClaimMessage {
     #[opcode(502)]
     SwapBeepBoopToBB,
 
-    // TODO
     /// Get current BEEP BOOP supply
     #[opcode(504)]
     #[returns(u128)]
@@ -117,20 +117,15 @@ enum ClaimMessage {
     #[opcode(511)]
     DepositBeepBoop,
 
-    /// Get contract's BEEP BOOP token balance
+    /// Get the next swap index (which BEEP BOOP token will be retrieved next)
+    #[opcode(512)]
+    #[returns(u128)]
+    GetNextSwapIndex,
+
+    /// Get the alkane ID of a stored BEEP BOOP token by index
     #[opcode(513)]
-    #[returns(u128)]
-    GetContractBeepBoopBalance,
-
-    /// Get contract's $BB token balance
-    #[opcode(514)]
-    #[returns(u128)]
-    GetContractBBBalance,
-
-    /// Get user's deposited BEEP BOOP balance
-    #[opcode(515)]
-    #[returns(u128)]
-    GetUserDepositedBeepBoop { user_block: u128, user_tx: u128 },
+    #[returns(String)]
+    GetStoredBeepBoopAlkaneId { index: u128 },
 
     /// Get collection identifier
     #[opcode(998)]
@@ -151,15 +146,8 @@ impl Token for Claim {
 impl Claim {
     pub fn initialize(&self) -> Result<CallResponse> {
         self.observe_initialization()?;
-
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        response.alkanes.0.push(AlkaneTransfer {
-            id: context.myself.clone(),
-            value: 1u128,
-        });
-
         Ok(response)
     }
 
@@ -268,6 +256,8 @@ impl Claim {
                 return Err(anyhow!("Invalid alkane ID for claiming"));
             }
 
+            // here, should be beep boop and lp tokens....
+
             let original_nft_id = self.resolve_alkane_id(&alkane.id)?;
             let total_rewards = self.calculate_total_rewards(&original_nft_id)?;
 
@@ -290,19 +280,13 @@ impl Claim {
             if available > 0 {
                 let new_total_claimed = previously_claimed + available;
                 claimed_pointer.set_value(new_total_claimed);
-                total_claimed = total_claimed
-                    .checked_add(available)
-                    .ok_or_else(|| anyhow!("Total claimed overflow"))?;
+                total_claimed += available;
             }
         }
 
         let mut total_claimed_pointer = self.total_claimed_pointer();
         let current_total = total_claimed_pointer.get_value::<u128>();
-        total_claimed_pointer.set_value(
-            current_total
-                .checked_add(total_claimed)
-                .ok_or_else(|| anyhow!("Global total claimed overflow"))?,
-        );
+        total_claimed_pointer.set_value(current_total + total_claimed);
 
         let mut response = CallResponse::default();
 
@@ -314,10 +298,6 @@ impl Claim {
 
             self.bb_supply_pointer()
                 .set_value(current_bb_supply + total_claimed);
-
-            let mut contract_balance_pointer = self.contract_bb_balance_pointer();
-            let current_contract_balance = contract_balance_pointer.get_value::<u128>();
-            contract_balance_pointer.set_value(current_contract_balance + total_claimed);
 
             response.alkanes.0.push(AlkaneTransfer {
                 id: context.myself.clone(),
@@ -402,12 +382,6 @@ impl Claim {
             return Err(anyhow!("Insufficient BEEP BOOP tokens in contract pool"));
         }
 
-        // Add only the used $BB to contract balance
-        let mut contract_bb_balance = self.contract_bb_balance_pointer().get_value::<u128>();
-        contract_bb_balance += bb_used_for_swap;
-        self.contract_bb_balance_pointer()
-            .set_value(contract_bb_balance);
-
         // Decrease the $BB supply since tokens are being burned/swapped back
         let current_bb_supply = self.bb_supply_pointer().get_value::<u128>();
         self.bb_supply_pointer()
@@ -471,11 +445,6 @@ impl Claim {
             return Err(anyhow!("Would exceed max BB supply"));
         }
 
-        let mut contract_bb_balance = self.contract_bb_balance_pointer().get_value::<u128>();
-        contract_bb_balance += bb_amount;
-        self.contract_bb_balance_pointer()
-            .set_value(contract_bb_balance);
-
         self.bb_supply_pointer()
             .set_value(current_bb_supply + bb_amount);
 
@@ -483,16 +452,6 @@ impl Claim {
             id: context.myself.clone(),
             value: bb_amount,
         });
-
-        Ok(response)
-    }
-
-    pub fn get_b_b_supply(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        let supply = self.bb_supply_pointer().get_value::<u128>();
-        response.data = supply.to_le_bytes().to_vec();
 
         Ok(response)
     }
@@ -519,7 +478,7 @@ impl Claim {
         Ok(response)
     }
 
-    fn get_collection_identifier(&self) -> Result<CallResponse> {
+    pub fn get_collection_identifier(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
@@ -545,54 +504,49 @@ impl Claim {
                     "Invalid token - only BEEP BOOP NFTs can be deposited"
                 ));
             }
+        }
 
+        for alkane in &context.incoming_alkanes.0 {
             self.store_beep_boop_token_in_contract(&alkane.id, alkane.value)?;
             total_beep_boop_deposited += alkane.value;
         }
 
-        let mut contract_balance_pointer = self.contract_beep_boop_balance_pointer();
-        let current_contract_balance = contract_balance_pointer.get_value::<u128>();
-        contract_balance_pointer.set_value(current_contract_balance + total_beep_boop_deposited);
+        let mut contract_beep_boop_balance_pointer = self.contract_beep_boop_balance_pointer();
+        let current_contract_beep_boop_balance =
+            contract_beep_boop_balance_pointer.get_value::<u128>();
+        contract_beep_boop_balance_pointer
+            .set_value(current_contract_beep_boop_balance + total_beep_boop_deposited);
 
         Ok(response)
     }
 
-    pub fn get_contract_beep_boop_balance(&self) -> Result<CallResponse> {
+    pub fn get_next_swap_index(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let balance = self
-            .contract_beep_boop_balance_pointer()
-            .get_value::<u128>();
-        response.data = balance.to_le_bytes().to_vec();
+        let next_swap_index = self.next_swap_index_pointer().get_value::<u128>();
+        response.data = next_swap_index.to_le_bytes().to_vec();
 
         Ok(response)
     }
 
-    pub fn get_contract_b_b_balance(&self) -> Result<CallResponse> {
+    pub fn get_stored_beep_boop_alkane_id(&self, index: u128) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let balance = self.contract_bb_balance_pointer().get_value::<u128>();
-        response.data = balance.to_le_bytes().to_vec();
+        let key_bytes = index.to_le_bytes().to_vec();
+        let token_data = self
+            .contract_stored_beep_boop_tokens_pointer()
+            .select(&key_bytes)
+            .get();
 
-        Ok(response)
-    }
+        if token_data.is_empty() {
+            return Err(anyhow!("No BEEP BOOP token stored at index {}", index));
+        }
 
-    pub fn get_user_deposited_beep_boop(
-        &self,
-        user_block: u128,
-        user_tx: u128,
-    ) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        let user_id = AlkaneId {
-            block: user_block,
-            tx: user_tx,
-        };
-        let balance = self.get_user_deposited_beep_boop_balance(&user_id)?;
-        response.data = balance.to_le_bytes().to_vec();
+        let token_id = self.bytes_to_nft_id(&token_data)?;
+        let identifier = format!("{}:{}", token_id.block, token_id.tx);
+        response.data = identifier.into_bytes();
 
         Ok(response)
     }
@@ -611,9 +565,7 @@ impl Claim {
             self.get_total_staked_blocks_from_contract(alkane_id, stake_contract_id)?;
         let current_staking_blocks =
             self.get_current_staking_period(alkane_id, stake_contract_id)?;
-        let total_rewards = total_staked_blocks
-            .checked_add(current_staking_blocks)
-            .ok_or_else(|| anyhow!("Rewards calculation overflow"))?;
+        let total_rewards = total_staked_blocks + current_staking_blocks;
 
         Ok(total_rewards)
     }
@@ -671,7 +623,7 @@ impl Claim {
     ) -> Result<u128> {
         let cellpack = Cellpack {
             target: *stake_contract_id,
-            inputs: vec![507, alkane_id.block, alkane_id.tx],
+            inputs: vec![STAKE_GET_STAKED_HEIGHT, alkane_id.block, alkane_id.tx],
         };
 
         let response = self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
@@ -788,73 +740,19 @@ impl Claim {
         self.get_original_nft_from_lp(id)
     }
 
-    // Storage pointers
-
-    /// Storage pointer for claimed amounts by alkane ID
-    fn claimed_amounts_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/claimed-amounts")
-    }
-
-    /// Storage pointer for total claimed amount across all alkanes
-    fn total_claimed_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/total-claimed")
-    }
-
-    /// Storage pointer for $BB token supply
-    fn bb_supply_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/bb-supply")
-    }
-
-    /// Storage pointer for contract's $BB token balance
-    fn contract_bb_balance_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/contract-bb-balance")
-    }
-
-    /// Storage pointer for contract's BEEP BOOP token balance
-    fn contract_beep_boop_balance_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/contract-beep-boop-balance")
-    }
-
-    /// Storage pointer for user deposited BEEP BOOP balances
-    fn user_deposited_beep_boop_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/user-deposited-beep-boop")
-    }
-
-    /// Storage pointer for contract's stored BEEP BOOP tokens
-    fn contract_stored_beep_boop_tokens_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/contract-stored-beep-boop-tokens")
-    }
-
-    /// Storage pointer for next deposit index (where to store next BEEP BOOP)
-    fn next_deposit_index_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/next-deposit-index")
-    }
-
-    /// Storage pointer for next swap index (which BEEP BOOP to give out next)
-    fn next_swap_index_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/next-swap-index")
-    }
-
-    fn get_user_deposited_beep_boop_balance(&self, user: &AlkaneId) -> Result<u128> {
-        let account_bytes = self.alkane_id_to_bytes(user);
-        let balance = self
-            .user_deposited_beep_boop_pointer()
-            .select(&account_bytes)
-            .get_value::<u128>();
-        Ok(balance)
-    }
-
     fn store_beep_boop_token_in_contract(&self, token_id: &AlkaneId, _value: u128) -> Result<()> {
-        let mut deposit_index_pointer = self.next_deposit_index_pointer();
+        let mut deposit_index_pointer = self.deposit_index_pointer();
         let current_deposit_index = deposit_index_pointer.get_value::<u128>();
 
         let token_data = self.nft_id_to_bytes(token_id);
+
         let key_bytes = current_deposit_index.to_le_bytes().to_vec();
+
         self.contract_stored_beep_boop_tokens_pointer()
             .select(&key_bytes)
             .set(Arc::new(token_data));
 
-        deposit_index_pointer.set_value(current_deposit_index + 1);
+        deposit_index_pointer.set_value(incoming_deposit_index + 1);
 
         Ok(())
     }
@@ -865,7 +763,7 @@ impl Claim {
 
         let mut swap_index_pointer = self.next_swap_index_pointer();
         let mut current_swap_index = swap_index_pointer.get_value::<u128>();
-        let deposit_index = self.next_deposit_index_pointer().get_value::<u128>();
+        let deposit_index = self.deposit_index_pointer().get_value::<u128>();
 
         while current_swap_index < deposit_index && remaining_nfts > 0 {
             let key_bytes = current_swap_index.to_le_bytes().to_vec();
@@ -918,6 +816,43 @@ impl Claim {
         let tx = u128::from_le_bytes(bytes[16..32].try_into().unwrap());
 
         Ok(AlkaneId { block, tx })
+    }
+
+    // Storage pointers
+
+    /// Storage pointer for claimed amounts by alkane ID
+    fn claimed_amounts_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/claimed-amounts")
+    }
+
+    /// Storage pointer for total claimed amount across all alkanes
+    fn total_claimed_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/total-claimed")
+    }
+
+    /// Storage pointer for $BB token supply
+    fn bb_supply_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/bb-supply")
+    }
+
+    /// Storage pointer for contract's BEEP BOOP token balance
+    fn contract_beep_boop_balance_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/contract-beep-boop-balance")
+    }
+
+    /// Storage pointer for contract's stored BEEP BOOP tokens
+    fn contract_stored_beep_boop_tokens_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/contract-stored-beep-boop-tokens")
+    }
+
+    /// Storage pointer for next deposit index (where to store next BEEP BOOP)
+    fn deposit_index_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/next-deposit-index")
+    }
+
+    /// Storage pointer for next swap index (which BEEP BOOP to give out next)
+    fn next_swap_index_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/next-swap-index")
     }
 }
 
