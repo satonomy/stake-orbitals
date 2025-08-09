@@ -16,14 +16,12 @@ const BEEP_BOOP_STAKE_CONTRACT_TX: u128 = 57751;
 const CONTRACT_NAME: &str = "BB";
 const CONTRACT_SYMBOL: &str = "🤖";
 
+// Swap rate: 25000 $BB = 1 BEEP BOOP
+const SWAP_RATE: u128 = 25000;
+
 // Token supply constants
-const MAX_SUPPLY: u128 = 259200000;
+const MAX_SUPPLY: u128 = 250000000;
 
-// Swap rate: 25,920 $BB = 1 BEEP BOOP
-const SWAP_RATE: u128 = 25920;
-
-// Max claim per BEEP BOOP NFT
-const MAX_CLAIM_PER_BEEP_BOOP: u128 = 25920;
 // Stake contract opcodes that we need to call
 const STAKE_GET_ELIGIBILITY: u128 = 506;
 const STAKE_GET_STAKED_BY_LP: u128 = 508;
@@ -102,13 +100,9 @@ enum ClaimMessage {
 
     /// Swap BEEP BOOPs to $BB tokens (1 BEEP BOOP -> 25K $BB)
     #[opcode(502)]
-    SwapBeepBoopToBB { amount: u128 },
+    SwapBeepBoopToBB,
 
-    /// Get current $BB token supply
-    #[opcode(503)]
-    #[returns(u128)]
-    GetBBSupply,
-
+    // TODO
     /// Get current BEEP BOOP supply
     #[opcode(504)]
     #[returns(u128)]
@@ -118,11 +112,6 @@ enum ClaimMessage {
     #[opcode(506)]
     #[returns(u128)]
     GetSwapRate,
-
-    /// Get max claim per BEEP BOOP NFT
-    #[opcode(507)]
-    #[returns(u128)]
-    GetMaxClaimPerBeepBoop,
 
     /// Deposit BEEP BOOP tokens to contract for swapping
     #[opcode(511)]
@@ -222,7 +211,7 @@ impl Claim {
 
         let alkane_id = AlkaneId { block, tx };
         let original_nft_id = self.resolve_alkane_id(&alkane_id)?;
-        let stake_contract_id = self.get_stake_contract_id()?;
+        let stake_contract_id = self.get_stake_contract_id();
         let total_staked_blocks =
             self.get_total_staked_blocks_from_contract(&original_nft_id, &stake_contract_id)?;
 
@@ -258,7 +247,7 @@ impl Claim {
             .get_value::<u128>();
 
         let earned_available = total_rewards.saturating_sub(claimed_amount);
-        let remaining_lifetime_limit = MAX_CLAIM_PER_BEEP_BOOP.saturating_sub(claimed_amount);
+        let remaining_lifetime_limit = SWAP_RATE.saturating_sub(claimed_amount);
         let available = earned_available.min(remaining_lifetime_limit);
         response.data = available.to_le_bytes().to_vec();
 
@@ -295,8 +284,7 @@ impl Claim {
             }
 
             let earned_available = total_rewards.saturating_sub(previously_claimed);
-            let remaining_lifetime_limit =
-                MAX_CLAIM_PER_BEEP_BOOP.saturating_sub(previously_claimed);
+            let remaining_lifetime_limit = SWAP_RATE.saturating_sub(previously_claimed);
             let available = earned_available.min(remaining_lifetime_limit);
 
             if available > 0 {
@@ -354,7 +342,7 @@ impl Claim {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let stake_contract_id = self.get_stake_contract_id()?;
+        let stake_contract_id = self.get_stake_contract_id();
         let total_staked_cellpack = Cellpack {
             target: stake_contract_id,
             inputs: vec![STAKE_GET_TOTAL_STAKED],
@@ -391,14 +379,21 @@ impl Claim {
             return Err(anyhow!("Must provide $BB tokens to swap"));
         }
 
-        if total_incoming_bb % SWAP_RATE != 0 {
+        // Calculate how many complete BEEP BOOPs can be obtained
+        let beep_boop_amount = total_incoming_bb / SWAP_RATE;
+
+        // Calculate change (remaining $BB after swap)
+        let change_amount = total_incoming_bb % SWAP_RATE;
+
+        // Calculate actual $BB used for the swap
+        let bb_used_for_swap = beep_boop_amount * SWAP_RATE;
+
+        if beep_boop_amount == 0 {
             return Err(anyhow!(
-                "Amount must be divisible by swap rate ({})",
+                "Insufficient $BB tokens to swap for at least 1 BEEP BOOP (need at least {})",
                 SWAP_RATE
             ));
         }
-
-        let beep_boop_amount = total_incoming_bb / SWAP_RATE;
 
         let contract_beep_boop_balance = self
             .contract_beep_boop_balance_pointer()
@@ -407,10 +402,16 @@ impl Claim {
             return Err(anyhow!("Insufficient BEEP BOOP tokens in contract pool"));
         }
 
+        // Add only the used $BB to contract balance
         let mut contract_bb_balance = self.contract_bb_balance_pointer().get_value::<u128>();
-        contract_bb_balance += total_incoming_bb;
+        contract_bb_balance += bb_used_for_swap;
         self.contract_bb_balance_pointer()
             .set_value(contract_bb_balance);
+
+        // Decrease the $BB supply since tokens are being burned/swapped back
+        let current_bb_supply = self.bb_supply_pointer().get_value::<u128>();
+        self.bb_supply_pointer()
+            .set_value(current_bb_supply - bb_used_for_swap);
 
         let beep_boop_tokens = self.retrieve_beep_boop_tokens_from_contract(beep_boop_amount)?;
 
@@ -423,16 +424,20 @@ impl Claim {
 
         response.alkanes.0.extend(beep_boop_tokens);
 
+        // Return change to user if any
+        if change_amount > 0 {
+            response.alkanes.0.push(AlkaneTransfer {
+                id: context.myself.clone(),
+                value: change_amount,
+            });
+        }
+
         Ok(response)
     }
 
-    pub fn swap_beep_boop_to_b_b(&self, amount: u128) -> Result<CallResponse> {
+    pub fn swap_beep_boop_to_b_b(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::default();
-
-        if amount == 0 {
-            return Err(anyhow!("Amount must be greater than 0"));
-        }
 
         if context.incoming_alkanes.0.is_empty() {
             return Err(anyhow!("No BEEP BOOP tokens provided for swap"));
@@ -440,14 +445,15 @@ impl Claim {
 
         let mut total_incoming_beep_boop = 0u128;
         for alkane in &context.incoming_alkanes.0 {
+            if !self.verify_id_collection(&alkane.id) {
+                return Err(anyhow!(
+                    "Invalid token - only BEEP BOOP NFTs can be swapped"
+                ));
+            }
             total_incoming_beep_boop += alkane.value;
         }
 
-        if total_incoming_beep_boop < amount {
-            return Err(anyhow!("Insufficient BEEP BOOP tokens provided"));
-        }
-
-        let bb_amount = amount * SWAP_RATE;
+        let bb_amount = total_incoming_beep_boop * SWAP_RATE;
 
         for alkane in &context.incoming_alkanes.0 {
             self.store_beep_boop_token_in_contract(&alkane.id, alkane.value)?;
@@ -495,7 +501,10 @@ impl Claim {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let supply = self.beep_boop_supply_pointer().get_value::<u128>();
+        // BEEP BOOP supply is the same as contract balance (count of stored NFTs)
+        let supply = self
+            .contract_beep_boop_balance_pointer()
+            .get_value::<u128>();
         response.data = supply.to_le_bytes().to_vec();
 
         Ok(response)
@@ -506,15 +515,6 @@ impl Claim {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         response.data = SWAP_RATE.to_le_bytes().to_vec();
-
-        Ok(response)
-    }
-
-    pub fn get_max_claim_per_beep_boop(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        response.data = MAX_CLAIM_PER_BEEP_BOOP.to_le_bytes().to_vec();
 
         Ok(response)
     }
@@ -598,7 +598,7 @@ impl Claim {
     }
 
     fn calculate_total_rewards(&self, alkane_id: &AlkaneId) -> Result<u128> {
-        let stake_contract_id = self.get_stake_contract_id()?;
+        let stake_contract_id = self.get_stake_contract_id();
         self.calculate_rewards_manually(alkane_id, &stake_contract_id)
     }
 
@@ -694,11 +694,11 @@ impl Claim {
         Ok(staked_height)
     }
 
-    fn get_stake_contract_id(&self) -> Result<AlkaneId> {
-        Ok(AlkaneId {
+    fn get_stake_contract_id(&self) -> AlkaneId {
+        AlkaneId {
             block: BEEP_BOOP_STAKE_CONTRACT_BLOCK,
             tx: BEEP_BOOP_STAKE_CONTRACT_TX,
-        })
+        }
     }
 
     pub fn alkane_id_to_bytes(&self, alkane_id: &AlkaneId) -> Vec<u8> {
@@ -709,7 +709,7 @@ impl Claim {
     }
 
     pub fn verify_id_collection(&self, orbital_id: &AlkaneId) -> bool {
-        let stake_contract_id = self.get_stake_contract_id().unwrap();
+        let stake_contract_id = self.get_stake_contract_id();
 
         // First try eligibility check - if returns 1, it's definitely valid unstaked BEEP BOOP
         let cellpack = Cellpack {
@@ -729,7 +729,7 @@ impl Claim {
     }
 
     fn verify_lp_token(&self, lp_id: &AlkaneId) -> bool {
-        let stake_contract_id = self.get_stake_contract_id().unwrap();
+        let stake_contract_id = self.get_stake_contract_id();
 
         let cellpack = Cellpack {
             target: stake_contract_id,
@@ -745,7 +745,7 @@ impl Claim {
     }
 
     fn get_original_nft_from_lp(&self, lp_id: &AlkaneId) -> Result<AlkaneId> {
-        let stake_contract_id = self.get_stake_contract_id().unwrap();
+        let stake_contract_id = self.get_stake_contract_id();
 
         let cellpack = Cellpack {
             target: stake_contract_id,
@@ -770,7 +770,7 @@ impl Claim {
     }
 
     fn resolve_alkane_id(&self, id: &AlkaneId) -> Result<AlkaneId> {
-        let stake_contract_id = self.get_stake_contract_id().unwrap();
+        let stake_contract_id = self.get_stake_contract_id();
 
         let cellpack = Cellpack {
             target: stake_contract_id,
@@ -803,11 +803,6 @@ impl Claim {
     /// Storage pointer for $BB token supply
     fn bb_supply_pointer(&self) -> StoragePointer {
         StoragePointer::from_keyword("/bb-supply")
-    }
-
-    /// Storage pointer for BEEP BOOP token supply
-    fn beep_boop_supply_pointer(&self) -> StoragePointer {
-        StoragePointer::from_keyword("/beep-boop-supply")
     }
 
     /// Storage pointer for contract's $BB token balance
