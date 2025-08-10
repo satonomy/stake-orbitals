@@ -94,11 +94,10 @@ enum ClaimMessage {
     #[returns(u128)]
     GetTotalClaimed,
 
-    /// Get total amount available to claim across all alkanes
-    #[opcode(402)]
-    #[returns(u128)]
-    GetTotalAvailable,
-
+    // /// Get total amount available to claim across all alkanes
+    // #[opcode(402)]
+    // #[returns(u128)]
+    // GetTotalAvailable,
     /// Swap $BB tokens to BEEP BOOPs (25K $BB -> 1 BEEP BOOP)
     #[opcode(501)]
     SwapBBToBeepBoop,
@@ -112,11 +111,10 @@ enum ClaimMessage {
     #[returns(u128)]
     GetBeepBoopSupply,
 
-    /// Get swap rate (how many $BB for 1 BEEP BOOP)
-    #[opcode(506)]
-    #[returns(u128)]
-    GetSwapRate,
-
+    // /// Get swap rate (how many $BB for 1 BEEP BOOP)
+    // #[opcode(506)]
+    // #[returns(u128)]
+    // GetSwapRate,
     /// Deposit BEEP BOOP tokens to contract for swapping
     #[opcode(511)]
     DepositBeepBoop,
@@ -314,34 +312,34 @@ impl Claim {
         Ok(response)
     }
 
-    pub fn get_total_available(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
+    // pub fn get_total_available(&self) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        let stake_contract_id = self.get_stake_contract_id();
-        let total_staked_cellpack = Cellpack {
-            target: stake_contract_id,
-            inputs: vec![STAKE_GET_TOTAL_STAKED],
-        };
+    //     let stake_contract_id = self.get_stake_contract_id();
+    //     let total_staked_cellpack = Cellpack {
+    //         target: stake_contract_id,
+    //         inputs: vec![STAKE_GET_TOTAL_STAKED],
+    //     };
 
-        let total_staked = match self.staticcall(
-            &total_staked_cellpack,
-            &AlkaneTransferParcel::default(),
-            self.fuel(),
-        ) {
-            Ok(total_staked_response) => match total_staked_response.data.try_into() {
-                Ok(data) => u128::from_le_bytes(data),
-                Err(_) => 0u128,
-            },
-            Err(_) => 0u128,
-        };
+    //     let total_staked = match self.staticcall(
+    //         &total_staked_cellpack,
+    //         &AlkaneTransferParcel::default(),
+    //         self.fuel(),
+    //     ) {
+    //         Ok(total_staked_response) => match total_staked_response.data.try_into() {
+    //             Ok(data) => u128::from_le_bytes(data),
+    //             Err(_) => 0u128,
+    //         },
+    //         Err(_) => 0u128,
+    //     };
 
-        let total_claimed = self.total_claimed_pointer().get_value::<u128>();
-        let total_available = total_staked.saturating_sub(total_claimed);
-        response.data = total_available.to_le_bytes().to_vec();
+    //     let total_claimed = self.total_claimed_pointer().get_value::<u128>();
+    //     let total_available = total_staked.saturating_sub(total_claimed);
+    //     response.data = total_available.to_le_bytes().to_vec();
 
-        Ok(response)
-    }
+    //     Ok(response)
+    // }
 
     pub fn swap_b_b_to_beep_boop(&self) -> Result<CallResponse> {
         let context = self.context()?;
@@ -469,14 +467,14 @@ impl Claim {
         Ok(response)
     }
 
-    pub fn get_swap_rate(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
+    // pub fn get_swap_rate(&self) -> Result<CallResponse> {
+    //     let context = self.context()?;
+    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
 
-        response.data = SWAP_RATE.to_le_bytes().to_vec();
+    //     response.data = SWAP_RATE.to_le_bytes().to_vec();
 
-        Ok(response)
-    }
+    //     Ok(response)
+    // }
 
     pub fn get_collection_identifier(&self) -> Result<CallResponse> {
         let context = self.context()?;
