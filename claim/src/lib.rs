@@ -284,7 +284,7 @@ impl Claim {
         let current_total = total_claimed_pointer.get_value::<u128>();
         total_claimed_pointer.set_value(current_total + total_claimed);
 
-        let mut response = CallResponse::default();
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         if total_claimed > 0 {
             let current_bb_supply = self.bb_supply_pointer().get_value::<u128>();
@@ -345,7 +345,7 @@ impl Claim {
 
     pub fn swap_b_b_to_beep_boop(&self) -> Result<CallResponse> {
         let context = self.context()?;
-        let mut response = CallResponse::default();
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let mut total_incoming_bb = 0u128;
         for alkane in &context.incoming_alkanes.0 {
@@ -421,10 +421,8 @@ impl Claim {
 
         let mut total_incoming_beep_boop = 0u128;
         for alkane in &context.incoming_alkanes.0 {
-            if !self.verify_id_collection(&alkane.id) {
-                return Err(anyhow!(
-                    "Invalid token - only BEEP BOOP NFTs can be swapped"
-                ));
+            if !self.is_original(&alkane.id)? {
+                return Err(anyhow!("Only original BEEP BOOP"));
             }
             total_incoming_beep_boop += alkane.value;
         }
@@ -501,10 +499,8 @@ impl Claim {
         let mut total_beep_boop_deposited = 0u128;
 
         for alkane in &context.incoming_alkanes.0 {
-            if !self.verify_id_collection(&alkane.id) {
-                return Err(anyhow!(
-                    "Invalid token - only BEEP BOOP NFTs can be deposited"
-                ));
+            if !self.is_original(&alkane.id)? {
+                return Err(anyhow!("Only original BEEP BOOP"));
             }
         }
 
@@ -646,42 +642,6 @@ impl Claim {
         bytes
     }
 
-    pub fn verify_id_collection(&self, orbital_id: &AlkaneId) -> bool {
-        let stake_contract_id = self.get_stake_contract_id();
-
-        // First try eligibility check - if returns 1, it's definitely valid unstaked BEEP BOOP
-        let cellpack = Cellpack {
-            target: stake_contract_id,
-            inputs: vec![STAKE_GET_ELIGIBILITY, orbital_id.block, orbital_id.tx],
-        };
-
-        let response = self
-            .staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())
-            .unwrap();
-
-        if response.data[0] == 1 {
-            return true;
-        }
-
-        self.verify_lp_token(orbital_id)
-    }
-
-    fn verify_lp_token(&self, lp_id: &AlkaneId) -> bool {
-        let stake_contract_id = self.get_stake_contract_id();
-
-        let cellpack = Cellpack {
-            target: stake_contract_id,
-            inputs: vec![STAKE_GET_STAKED_BY_LP, lp_id.block, lp_id.tx],
-        };
-
-        let response = self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel());
-
-        match response {
-            Ok(resp) => !resp.data.is_empty(),
-            Err(_) => false,
-        }
-    }
-
     fn get_original_nft_from_lp(&self, lp_id: &AlkaneId) -> Result<AlkaneId> {
         let stake_contract_id = self.get_stake_contract_id();
 
@@ -695,6 +655,7 @@ impl Claim {
             .unwrap();
 
         let id_string = String::from_utf8(response.data).unwrap();
+
         let parts: Vec<&str> = id_string.split(':').collect();
 
         if parts.len() != 2 {
@@ -737,7 +698,7 @@ impl Claim {
         let mut deposit_index_pointer = self.deposit_index_pointer();
         let current_deposit_index = deposit_index_pointer.get_value::<u128>();
 
-        let token_data = self.nft_id_to_bytes(token_id);
+        let token_data = self.alkane_id_to_bytes(token_id);
 
         let key_bytes = current_deposit_index.to_le_bytes().to_vec();
 
@@ -793,13 +754,6 @@ impl Claim {
         Ok(tokens)
     }
 
-    fn nft_id_to_bytes(&self, token_id: &AlkaneId) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(32);
-        bytes.extend_from_slice(&token_id.block.to_le_bytes());
-        bytes.extend_from_slice(&token_id.tx.to_le_bytes());
-        bytes
-    }
-
     fn bytes_to_nft_id(&self, bytes: &[u8]) -> Result<AlkaneId> {
         if bytes.len() != 32 {
             return Err(anyhow!("Invalid NFT data length"));
@@ -846,6 +800,16 @@ impl Claim {
     /// Storage pointer for next swap index (which BEEP BOOP to give out next)
     fn next_swap_index_pointer(&self) -> StoragePointer {
         StoragePointer::from_keyword("/next-swap-index")
+    }
+
+    /// Check if an alkane ID represents an original BEEP BOOP NFT (not staked)
+    fn is_original(&self, id: &AlkaneId) -> Result<bool> {
+        let cp = Cellpack {
+            target: self.get_stake_contract_id(),
+            inputs: vec![STAKE_GET_ELIGIBILITY, id.block, id.tx],
+        };
+        let r = self.staticcall(&cp, &AlkaneTransferParcel::default(), self.fuel())?;
+        Ok(r.data.first().copied() == Some(1))
     }
 }
 
