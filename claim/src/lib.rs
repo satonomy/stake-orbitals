@@ -28,7 +28,6 @@ const STAKE_GET_STAKED_HEIGHT: u128 = 507;
 const STAKE_GET_STAKED_BY_LP: u128 = 508;
 const STAKE_GET_TOTAL_STAKED_BLOCKS: u128 = 510;
 const STAKE_GET_TOTAL_STAKED: u128 = 511;
-
 #[derive(Default)]
 pub struct Claim(());
 
@@ -65,6 +64,11 @@ enum ClaimMessage {
     #[opcode(103)]
     #[returns(u128)]
     GetMinted,
+
+    /// Get the value per mint
+    #[opcode(104)]
+    #[returns(u128)]
+    GetValuePerMint,
 
     /// Get total staked blocks for a specific alkane by calling the stake contract
     #[opcode(300)]
@@ -147,7 +151,7 @@ impl Claim {
     pub fn initialize(&self) -> Result<CallResponse> {
         self.observe_initialization()?;
         let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        let response = CallResponse::forward(&context.incoming_alkanes);
         Ok(response)
     }
 
@@ -199,9 +203,7 @@ impl Claim {
 
         let alkane_id = AlkaneId { block, tx };
         let original_nft_id = self.resolve_alkane_id(&alkane_id)?;
-        let stake_contract_id = self.get_stake_contract_id();
-        let total_staked_blocks =
-            self.get_total_staked_blocks_from_contract(&original_nft_id, &stake_contract_id)?;
+        let total_staked_blocks = self.get_total_staked_blocks_from_contract(&original_nft_id)?;
 
         response.data = total_staked_blocks.to_le_bytes().to_vec();
         Ok(response)
@@ -252,12 +254,6 @@ impl Claim {
         let mut total_claimed = 0u128;
 
         for alkane in &context.incoming_alkanes.0 {
-            if !self.verify_id_collection(&alkane.id) {
-                return Err(anyhow!("Invalid alkane ID for claiming"));
-            }
-
-            // here, should be beep boop and lp tokens....
-
             let original_nft_id = self.resolve_alkane_id(&alkane.id)?;
             let total_rewards = self.calculate_total_rewards(&original_nft_id)?;
 
@@ -265,9 +261,9 @@ impl Claim {
             let mut claimed_pointer = self.claimed_amounts_pointer().select(&original_nft_bytes);
             let previously_claimed = claimed_pointer.get_value::<u128>();
 
-            if total_rewards < previously_claimed {
+            if total_rewards <= previously_claimed {
                 return Err(anyhow!(
-                    "Invalid state: claimed ({}) exceeds total rewards ({})",
+                    "No rewards available: claimed ({}) equals or exceeds total rewards ({})",
                     previously_claimed,
                     total_rewards
                 ));
@@ -328,12 +324,18 @@ impl Claim {
             inputs: vec![STAKE_GET_TOTAL_STAKED],
         };
 
-        let total_staked_response = self.staticcall(
+        let total_staked = match self.staticcall(
             &total_staked_cellpack,
             &AlkaneTransferParcel::default(),
             self.fuel(),
-        )?;
-        let total_staked = u128::from_le_bytes(total_staked_response.data.try_into().unwrap());
+        ) {
+            Ok(total_staked_response) => match total_staked_response.data.try_into() {
+                Ok(data) => u128::from_le_bytes(data),
+                Err(_) => 0u128,
+            },
+            Err(_) => 0u128,
+        };
+
         let total_claimed = self.total_claimed_pointer().get_value::<u128>();
         let total_available = total_staked.saturating_sub(total_claimed);
         response.data = total_available.to_le_bytes().to_vec();
@@ -552,92 +554,76 @@ impl Claim {
     }
 
     fn calculate_total_rewards(&self, alkane_id: &AlkaneId) -> Result<u128> {
-        let stake_contract_id = self.get_stake_contract_id();
-        self.calculate_rewards_manually(alkane_id, &stake_contract_id)
-    }
-
-    fn calculate_rewards_manually(
-        &self,
-        alkane_id: &AlkaneId,
-        stake_contract_id: &AlkaneId,
-    ) -> Result<u128> {
-        let total_staked_blocks =
-            self.get_total_staked_blocks_from_contract(alkane_id, stake_contract_id)?;
-        let current_staking_blocks =
-            self.get_current_staking_period(alkane_id, stake_contract_id)?;
+        let total_staked_blocks = self
+            .get_total_staked_blocks_from_contract(alkane_id)
+            .unwrap_or(0);
+        let current_staking_blocks = self.get_current_staking_period(alkane_id).unwrap_or(0);
         let total_rewards = total_staked_blocks + current_staking_blocks;
 
         Ok(total_rewards)
     }
 
-    fn get_total_staked_blocks_from_contract(
-        &self,
-        alkane_id: &AlkaneId,
-        stake_contract_id: &AlkaneId,
-    ) -> Result<u128> {
+    fn get_total_staked_blocks_from_contract(&self, alkane_id: &AlkaneId) -> Result<u128> {
+        let stake_contract_id = self.get_stake_contract_id();
         let cellpack = Cellpack {
-            target: *stake_contract_id,
+            target: stake_contract_id,
             inputs: vec![STAKE_GET_TOTAL_STAKED_BLOCKS, alkane_id.block, alkane_id.tx],
         };
 
-        let response = self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
+        let response =
+            match self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel()) {
+                Ok(response) => response,
+                Err(_) => return Ok(0u128), // Return 0 if staticcall fails
+            };
 
         if response.data.len() != 16 {
-            return Err(anyhow!("Invalid response size from GetTotalStakedBlocks"));
+            return Ok(0u128); // Return 0 if response size is invalid
         }
 
-        let total_blocks = u128::from_le_bytes(
-            response
-                .data
-                .try_into()
-                .map_err(|_| anyhow!("Failed to parse GetTotalStakedBlocks response"))?,
-        );
+        let total_blocks = match response.data.try_into() {
+            Ok(data) => u128::from_le_bytes(data),
+            Err(_) => 0u128, // Return 0 if data parsing fails
+        };
 
         Ok(total_blocks)
     }
 
-    fn get_current_staking_period(
-        &self,
-        alkane_id: &AlkaneId,
-        stake_contract_id: &AlkaneId,
-    ) -> Result<u128> {
-        let staked_height_result = self.try_get_staked_height(alkane_id, stake_contract_id);
+    fn get_current_staking_period(&self, alkane_id: &AlkaneId) -> Result<u128> {
+        let staked_height = self.try_get_staked_height(alkane_id).unwrap_or(0);
 
-        match staked_height_result {
-            Ok(staked_height) => {
-                let current_height = u128::from(self.height());
-                if current_height >= staked_height {
-                    Ok(current_height - staked_height)
-                } else {
-                    Ok(0)
-                }
-            }
-            Err(_) => Ok(0),
+        if staked_height == 0 {
+            return Ok(0); // Not staked or failed to get height
+        }
+
+        let current_height = u128::from(self.height());
+        if current_height >= staked_height {
+            Ok(current_height - staked_height)
+        } else {
+            Ok(0)
         }
     }
 
-    fn try_get_staked_height(
-        &self,
-        alkane_id: &AlkaneId,
-        stake_contract_id: &AlkaneId,
-    ) -> Result<u128> {
+    fn try_get_staked_height(&self, alkane_id: &AlkaneId) -> Result<u128> {
+        let stake_contract_id = self.get_stake_contract_id();
         let cellpack = Cellpack {
-            target: *stake_contract_id,
+            target: stake_contract_id,
             inputs: vec![STAKE_GET_STAKED_HEIGHT, alkane_id.block, alkane_id.tx],
         };
 
-        let response = self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
+        let response =
+            match self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel()) {
+                Ok(response) => response,
+                Err(_) => return Err(anyhow!("Staticcall failed")), // Return error to be caught by caller
+            };
 
         if response.data.len() != 16 {
             return Err(anyhow!("Invalid response size from GetStakedHeight"));
         }
 
-        let staked_height = u128::from_le_bytes(
-            response
-                .data
-                .try_into()
-                .map_err(|_| anyhow!("Failed to parse GetStakedHeight response"))?,
-        );
+        let staked_height = match response.data.try_into() {
+            Ok(data) => u128::from_le_bytes(data),
+            Err(_) => return Err(anyhow!("Failed to parse GetStakedHeight response")),
+        };
 
         if staked_height == 0 {
             return Err(anyhow!("Not currently staked"));
@@ -721,6 +707,13 @@ impl Claim {
         Ok(AlkaneId { block, tx })
     }
 
+    fn get_value_per_mint(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        response.data = SWAP_RATE.to_le_bytes().to_vec();
+        Ok(response)
+    }
+
     fn resolve_alkane_id(&self, id: &AlkaneId) -> Result<AlkaneId> {
         let stake_contract_id = self.get_stake_contract_id();
 
@@ -752,7 +745,7 @@ impl Claim {
             .select(&key_bytes)
             .set(Arc::new(token_data));
 
-        deposit_index_pointer.set_value(incoming_deposit_index + 1);
+        deposit_index_pointer.set_value(current_deposit_index + 1);
 
         Ok(())
     }
