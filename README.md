@@ -91,7 +91,7 @@ cargo build --target wasm32-unknown-unknown --release
 oyl alkane new-contract \
   -c ./target/alkanes/wasm32-unknown-unknown/release/alkanes_stake.wasm \
   -data 1,0 \
-  -p bitcoin
+  -p oylnet
 ```
 
 **Sample response:**
@@ -114,7 +114,7 @@ oyl alkane new-contract \
 oyl provider alkanes \
   --method trace \
   -params '{
-    "txid":"67ad5d9c86b9d0b6c924074611c45d4c6db60c5a631e7b14908df4089c223078",
+    "txid":"25854c2dc35bf3ca081a791b964af89c4285698357528dc3041308d693da4c13",
     "vout":3
   }' \
   -p oylnet

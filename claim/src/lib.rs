@@ -17,10 +17,10 @@ const CONTRACT_NAME: &str = "BB";
 const CONTRACT_SYMBOL: &str = "🤖";
 
 // Swap rate: 25000 $BB = 1 BEEP BOOP
-const SWAP_RATE: u128 = 25000;
+const SWAP_RATE: u128 = 2_500_000_000_000;
 
 // Token supply constants
-const MAX_SUPPLY: u128 = 250000000;
+const MAX_SUPPLY: u128 = 25_000_000_000_000_000;
 
 // Stake contract opcodes that we need to call
 const STAKE_GET_ELIGIBILITY: u128 = 506;
@@ -94,10 +94,6 @@ enum ClaimMessage {
     #[returns(u128)]
     GetTotalClaimed,
 
-    // /// Get total amount available to claim across all alkanes
-    // #[opcode(402)]
-    // #[returns(u128)]
-    // GetTotalAvailable,
     /// Swap $BB tokens to BEEP BOOPs (25K $BB -> 1 BEEP BOOP)
     #[opcode(501)]
     SwapBBToBeepBoop,
@@ -111,9 +107,6 @@ enum ClaimMessage {
     #[returns(u128)]
     GetBeepBoopSupply,
 
-    // /// Get swap rate (how many $BB for 1 BEEP BOOP)
-    // #[opcode(506)]
-    // #[returns(u128)]
     // GetSwapRate,
     /// Deposit BEEP BOOP tokens to contract for swapping
     #[opcode(511)]
@@ -128,11 +121,6 @@ enum ClaimMessage {
     #[opcode(513)]
     #[returns(String)]
     GetStoredBeepBoopAlkaneId { index: u128 },
-
-    /// Get collection identifier
-    #[opcode(998)]
-    #[returns(String)]
-    GetCollectionIdentifier,
 }
 
 impl Token for Claim {
@@ -228,7 +216,10 @@ impl Claim {
 
         let alkane_id = AlkaneId { block, tx };
         let original_nft_id = self.resolve_alkane_id(&alkane_id)?;
-        let total_rewards = self.calculate_total_rewards(&original_nft_id)?;
+
+        let is_original = original_nft_id == alkane_id;
+
+        let total_rewards = self.calculate_total_rewards(&original_nft_id, is_original)?;
         let claimed_amount = self
             .claimed_amounts_pointer()
             .select(&self.alkane_id_to_bytes(&original_nft_id))
@@ -253,7 +244,8 @@ impl Claim {
 
         for alkane in &context.incoming_alkanes.0 {
             let original_nft_id = self.resolve_alkane_id(&alkane.id)?;
-            let total_rewards = self.calculate_total_rewards(&original_nft_id)?;
+            let is_original = original_nft_id == alkane_id;
+            let total_rewards = self.calculate_total_rewards(&original_nft_id, is_original)?;
 
             let original_nft_bytes = self.alkane_id_to_bytes(&original_nft_id);
             let mut claimed_pointer = self.claimed_amounts_pointer().select(&original_nft_bytes);
@@ -278,13 +270,13 @@ impl Claim {
             }
         }
 
-        let mut total_claimed_pointer = self.total_claimed_pointer();
-        let current_total = total_claimed_pointer.get_value::<u128>();
-        total_claimed_pointer.set_value(current_total + total_claimed);
-
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         if total_claimed > 0 {
+            let mut total_claimed_pointer = self.total_claimed_pointer();
+            let current_total = total_claimed_pointer.get_value::<u128>();
+            total_claimed_pointer.set_value(current_total + total_claimed);
+
             let current_bb_supply = self.bb_supply_pointer().get_value::<u128>();
             if current_bb_supply + total_claimed > MAX_SUPPLY {
                 return Err(anyhow!("Would exceed max BB supply"));
@@ -312,47 +304,21 @@ impl Claim {
         Ok(response)
     }
 
-    // pub fn get_total_available(&self) -> Result<CallResponse> {
-    //     let context = self.context()?;
-    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-    //     let stake_contract_id = self.get_stake_contract_id();
-    //     let total_staked_cellpack = Cellpack {
-    //         target: stake_contract_id,
-    //         inputs: vec![STAKE_GET_TOTAL_STAKED],
-    //     };
-
-    //     let total_staked = match self.staticcall(
-    //         &total_staked_cellpack,
-    //         &AlkaneTransferParcel::default(),
-    //         self.fuel(),
-    //     ) {
-    //         Ok(total_staked_response) => match total_staked_response.data.try_into() {
-    //             Ok(data) => u128::from_le_bytes(data),
-    //             Err(_) => 0u128,
-    //         },
-    //         Err(_) => 0u128,
-    //     };
-
-    //     let total_claimed = self.total_claimed_pointer().get_value::<u128>();
-    //     let total_available = total_staked.saturating_sub(total_claimed);
-    //     response.data = total_available.to_le_bytes().to_vec();
-
-    //     Ok(response)
-    // }
-
     pub fn swap_b_b_to_beep_boop(&self) -> Result<CallResponse> {
         let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
+        let mut response = CallResponse::default();
 
         let mut total_incoming_bb = 0u128;
+        let mut non_bb_tokens = Vec::new();
+
+        // Separate BB tokens from other tokens
         for alkane in &context.incoming_alkanes.0 {
-            if alkane.id != context.myself {
-                return Err(anyhow!(
-                    "Invalid token - only $BB tokens from this contract are accepted"
-                ));
+            if alkane.id == context.myself {
+                total_incoming_bb += alkane.value;
+            } else {
+                // Store non-BB tokens to return them
+                non_bb_tokens.push(alkane.clone());
             }
-            total_incoming_bb += alkane.value;
         }
 
         if total_incoming_bb == 0 {
@@ -406,6 +372,9 @@ impl Claim {
             });
         }
 
+        // Return any non-BB tokens that were sent
+        response.alkanes.0.extend(non_bb_tokens);
+
         Ok(response)
     }
 
@@ -418,17 +387,29 @@ impl Claim {
         }
 
         let mut total_incoming_beep_boop = 0u128;
+        let mut has_original_token = false;
+        let mut non_original_tokens = Vec::new();
+
+        // Separate original BEEP BOOP tokens from non-original tokens
         for alkane in &context.incoming_alkanes.0 {
-            if !self.is_original(&alkane.id)? {
-                return Err(anyhow!("Only original BEEP BOOP"));
+            if self.is_original(&alkane.id)? {
+                total_incoming_beep_boop += alkane.value;
+                has_original_token = true;
+            } else {
+                non_original_tokens.push(alkane.clone());
             }
-            total_incoming_beep_boop += alkane.value;
+        }
+
+        if !has_original_token {
+            return Err(anyhow!("No original BEEP BOOP tokens provided for swap"));
         }
 
         let bb_amount = total_incoming_beep_boop * SWAP_RATE;
 
         for alkane in &context.incoming_alkanes.0 {
-            self.store_beep_boop_token_in_contract(&alkane.id, alkane.value)?;
+            if self.is_original(&alkane.id)? {
+                self.store_beep_boop_token_in_contract(&alkane.id, alkane.value)?;
+            }
         }
 
         let mut contract_beep_boop_balance = self
@@ -450,6 +431,9 @@ impl Claim {
             id: context.myself.clone(),
             value: bb_amount,
         });
+
+        // Return any non-original tokens that were sent
+        response.alkanes.0.extend(non_original_tokens);
 
         Ok(response)
     }
@@ -475,16 +459,6 @@ impl Claim {
 
     //     Ok(response)
     // }
-
-    pub fn get_collection_identifier(&self) -> Result<CallResponse> {
-        let context = self.context()?;
-        let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-        let identifier = format!("{}:{}", context.myself.block, context.myself.tx);
-        response.data = identifier.into_bytes();
-
-        Ok(response)
-    }
 
     pub fn deposit_beep_boop(&self) -> Result<CallResponse> {
         let context = self.context()?;
@@ -547,10 +521,15 @@ impl Claim {
         Ok(response)
     }
 
-    fn calculate_total_rewards(&self, alkane_id: &AlkaneId) -> Result<u128> {
+    fn calculate_total_rewards(&self, alkane_id: &AlkaneId, is_original: bool) -> Result<u128> {
         let total_staked_blocks = self
             .get_total_staked_blocks_from_contract(alkane_id)
             .unwrap_or(0);
+
+        if is_original {
+            return Ok(total_staked_blocks);
+        }
+
         let current_staking_blocks = self.get_current_staking_period(alkane_id).unwrap_or(0);
         let total_rewards = total_staked_blocks + current_staking_blocks;
 
@@ -583,10 +562,13 @@ impl Claim {
     }
 
     fn get_current_staking_period(&self, alkane_id: &AlkaneId) -> Result<u128> {
-        let staked_height = self.try_get_staked_height(alkane_id).unwrap_or(0);
+        let staked_height = match self.try_get_staked_height(alkane_id) {
+            Ok(height) => height,
+            Err(_) => return Ok(0), // Not staked or failed to get height
+        };
 
         if staked_height == 0 {
-            return Ok(0); // Not staked or failed to get height
+            return Ok(0); // Not staked
         }
 
         let current_height = u128::from(self.height());
@@ -604,24 +586,25 @@ impl Claim {
             inputs: vec![STAKE_GET_STAKED_HEIGHT, alkane_id.block, alkane_id.tx],
         };
 
-        let response =
-            match self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel()) {
-                Ok(response) => response,
-                Err(_) => return Err(anyhow!("Staticcall failed")), // Return error to be caught by caller
-            };
+        let call_response =
+            self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())?;
 
-        if response.data.len() != 16 {
-            return Err(anyhow!("Invalid response size from GetStakedHeight"));
-        }
-
-        let staked_height = match response.data.try_into() {
-            Ok(data) => u128::from_le_bytes(data),
-            Err(_) => return Err(anyhow!("Failed to parse GetStakedHeight response")),
+        let staked_height = if call_response.data.len() == 16 {
+            if let Ok(bytes) = call_response.data.try_into() {
+                u128::from_le_bytes(bytes)
+            } else {
+                return Err(anyhow!("Invalid data format from stake contract"));
+            }
+        } else if call_response.data.len() == 0 {
+            return Err(anyhow!(
+                "No data from stake contract - orbital may not be staked"
+            ));
+        } else {
+            return Err(anyhow!(
+                "Invalid data length from stake contract: expected 16 bytes, got {}",
+                call_response.data.len()
+            ));
         };
-
-        if staked_height == 0 {
-            return Err(anyhow!("Not currently staked"));
-        }
 
         Ok(staked_height)
     }
@@ -650,18 +633,31 @@ impl Claim {
 
         let response = self
             .staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())
-            .unwrap();
+            .map_err(|_| {
+                anyhow!(
+                    "Failed to call stake contract for LP token {}",
+                    format!("{}:{}", lp_id.block, lp_id.tx)
+                )
+            })?;
 
-        let id_string = String::from_utf8(response.data).unwrap();
+        let id_string = String::from_utf8(response.data)
+            .map_err(|_| anyhow!("Invalid UTF-8 response from stake contract"))?;
 
         let parts: Vec<&str> = id_string.split(':').collect();
 
         if parts.len() != 2 {
-            return Err(anyhow!("Invalid LP token response format"));
+            return Err(anyhow!(
+                "Invalid LP token response format: expected 'block:tx', got '{}'",
+                id_string
+            ));
         }
 
-        let block = parts[0].parse::<u128>().unwrap();
-        let tx = parts[1].parse::<u128>().unwrap();
+        let block = parts[0]
+            .parse::<u128>()
+            .map_err(|_| anyhow!("Invalid block number in response: '{}'", parts[0]))?;
+        let tx = parts[1]
+            .parse::<u128>()
+            .map_err(|_| anyhow!("Invalid tx number in response: '{}'", parts[1]))?;
 
         Ok(AlkaneId { block, tx })
     }
@@ -681,12 +677,22 @@ impl Claim {
             inputs: vec![STAKE_GET_ELIGIBILITY, id.block, id.tx],
         };
 
-        let response = self
-            .staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel())
-            .unwrap();
+        let response =
+            match self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel()) {
+                Ok(response) => response,
+                Err(_) => {
+                    // If eligibility check fails, try to get original NFT from LP
+                    return self.get_original_nft_from_lp(id);
+                }
+            };
 
-        if response.data[0] == 1 {
-            return Ok(*id);
+        let results = u128::from_le_bytes(response.data.try_into().unwrap());
+
+        if response.data.len() >= 1 {
+            let eligible = response.data[0];
+            if eligible == 1 {
+                return Ok(*id);
+            }
         }
 
         self.get_original_nft_from_lp(id)
