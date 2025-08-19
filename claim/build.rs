@@ -73,7 +73,7 @@ fn main() {
     std::env::set_current_dir(&crates_dir).unwrap();
 
     build_alkane(wasm_str, vec![]).unwrap();
-    let mod_name = "alkanes_claim".to_owned();
+    let mod_name = "alkanes_bb".to_owned();
     let f: Vec<u8> = fs::read(
         &Path::new(&wasm_str)
             .join("wasm32-unknown-unknown")

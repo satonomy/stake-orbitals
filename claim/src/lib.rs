@@ -27,15 +27,15 @@ const STAKE_GET_ELIGIBILITY: u128 = 506;
 const STAKE_GET_STAKED_HEIGHT: u128 = 507;
 const STAKE_GET_STAKED_BY_LP: u128 = 508;
 const STAKE_GET_TOTAL_STAKED_BLOCKS: u128 = 510;
-const STAKE_GET_TOTAL_STAKED: u128 = 511;
-#[derive(Default)]
-pub struct Claim(());
 
-impl AlkaneResponder for Claim {}
+#[derive(Default)]
+pub struct BB(());
+
+impl AlkaneResponder for BB {}
 
 /// Message types for claim contract interaction
 #[derive(MessageDispatch)]
-enum ClaimMessage {
+enum BBMessage {
     /// Initialize the claim contract
     #[opcode(0)]
     Initialize,
@@ -85,7 +85,7 @@ enum ClaimMessage {
     #[returns(u128)]
     GetTotalAvailableToClaim { block: u128, tx: u128 },
 
-    /// Claim available rewards for specific alkane IDs
+    /// BB available rewards for specific alkane IDs
     #[opcode(400)]
     ClaimRewards,
 
@@ -123,7 +123,7 @@ enum ClaimMessage {
     GetStoredBeepBoopAlkaneId { index: u128 },
 }
 
-impl Token for Claim {
+impl Token for BB {
     fn name(&self) -> String {
         String::from(CONTRACT_NAME)
     }
@@ -133,7 +133,7 @@ impl Token for Claim {
     }
 }
 
-impl Claim {
+impl BB {
     pub fn initialize(&self) -> Result<CallResponse> {
         self.observe_initialization()?;
         let context = self.context()?;
@@ -244,7 +244,7 @@ impl Claim {
 
         for alkane in &context.incoming_alkanes.0 {
             let original_nft_id = self.resolve_alkane_id(&alkane.id)?;
-            let is_original = original_nft_id == alkane_id;
+            let is_original = original_nft_id == alkane.id;
             let total_rewards = self.calculate_total_rewards(&original_nft_id, is_original)?;
 
             let original_nft_bytes = self.alkane_id_to_bytes(&original_nft_id);
@@ -408,7 +408,8 @@ impl Claim {
 
         for alkane in &context.incoming_alkanes.0 {
             if self.is_original(&alkane.id)? {
-                self.store_beep_boop_token_in_contract(&alkane.id, alkane.value)?;
+                // Store in used pool since these tokens were previously retrieved from the contract
+                self.store_beep_boop_token_in_used_pool(&alkane.id, alkane.value)?;
             }
         }
 
@@ -450,15 +451,6 @@ impl Claim {
 
         Ok(response)
     }
-
-    // pub fn get_swap_rate(&self) -> Result<CallResponse> {
-    //     let context = self.context()?;
-    //     let mut response = CallResponse::forward(&context.incoming_alkanes);
-
-    //     response.data = SWAP_RATE.to_le_bytes().to_vec();
-
-    //     Ok(response)
-    // }
 
     pub fn deposit_beep_boop(&self) -> Result<CallResponse> {
         let context = self.context()?;
@@ -662,7 +654,7 @@ impl Claim {
         Ok(AlkaneId { block, tx })
     }
 
-    fn get_value_per_mint(&self) -> Result<CallResponse> {
+    pub fn get_value_per_mint(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
         response.data = SWAP_RATE.to_le_bytes().to_vec();
@@ -685,8 +677,6 @@ impl Claim {
                     return self.get_original_nft_from_lp(id);
                 }
             };
-
-        let results = u128::from_le_bytes(response.data.try_into().unwrap());
 
         if response.data.len() >= 1 {
             let eligible = response.data[0];
@@ -715,18 +705,36 @@ impl Claim {
         Ok(())
     }
 
+    fn store_beep_boop_token_in_used_pool(&self, token_id: &AlkaneId, _value: u128) -> Result<()> {
+        let mut used_deposit_index_pointer = self.used_deposit_index_pointer();
+        let current_used_deposit_index = used_deposit_index_pointer.get_value::<u128>();
+
+        let token_data = self.alkane_id_to_bytes(token_id);
+
+        let key_bytes = current_used_deposit_index.to_le_bytes().to_vec();
+
+        self.contract_used_beep_boop_tokens_pointer()
+            .select(&key_bytes)
+            .set(Arc::new(token_data));
+
+        used_deposit_index_pointer.set_value(current_used_deposit_index + 1);
+
+        Ok(())
+    }
+
     fn retrieve_beep_boop_tokens_from_contract(&self, amount: u128) -> Result<Vec<AlkaneTransfer>> {
         let mut tokens = Vec::new();
         let mut remaining_nfts = amount;
 
-        let mut swap_index_pointer = self.next_swap_index_pointer();
-        let mut current_swap_index = swap_index_pointer.get_value::<u128>();
-        let deposit_index = self.deposit_index_pointer().get_value::<u128>();
+        // First, try to get tokens from the used pool (prioritize recycled tokens)
+        let mut used_swap_index_pointer = self.used_next_swap_index_pointer();
+        let mut used_current_swap_index = used_swap_index_pointer.get_value::<u128>();
+        let used_deposit_index = self.used_deposit_index_pointer().get_value::<u128>();
 
-        while current_swap_index < deposit_index && remaining_nfts > 0 {
-            let key_bytes = current_swap_index.to_le_bytes().to_vec();
+        while used_current_swap_index < used_deposit_index && remaining_nfts > 0 {
+            let key_bytes = used_current_swap_index.to_le_bytes().to_vec();
             let token_data = self
-                .contract_stored_beep_boop_tokens_pointer()
+                .contract_used_beep_boop_tokens_pointer()
                 .select(&key_bytes)
                 .get();
 
@@ -739,23 +747,68 @@ impl Claim {
                 });
                 remaining_nfts -= 1;
 
-                self.contract_stored_beep_boop_tokens_pointer()
+                self.contract_used_beep_boop_tokens_pointer()
                     .select(&key_bytes)
                     .set(Arc::new(Vec::new()));
 
-                current_swap_index += 1;
+                used_current_swap_index += 1;
             } else {
-                current_swap_index += 1;
+                used_current_swap_index += 1;
             }
         }
 
-        swap_index_pointer.set_value(current_swap_index);
+        used_swap_index_pointer.set_value(used_current_swap_index);
+
+        // If we still need more tokens, get them from the original pool
+        if remaining_nfts > 0 {
+            let mut swap_index_pointer = self.next_swap_index_pointer();
+            let mut current_swap_index = swap_index_pointer.get_value::<u128>();
+            let deposit_index = self.deposit_index_pointer().get_value::<u128>();
+
+            while current_swap_index < deposit_index && remaining_nfts > 0 {
+                let key_bytes = current_swap_index.to_le_bytes().to_vec();
+                let token_data = self
+                    .contract_stored_beep_boop_tokens_pointer()
+                    .select(&key_bytes)
+                    .get();
+
+                if token_data.len() > 0 {
+                    let token_id = self.bytes_to_nft_id(&token_data)?;
+
+                    tokens.push(AlkaneTransfer {
+                        id: token_id,
+                        value: 1,
+                    });
+                    remaining_nfts -= 1;
+
+                    self.contract_stored_beep_boop_tokens_pointer()
+                        .select(&key_bytes)
+                        .set(Arc::new(Vec::new()));
+
+                    current_swap_index += 1;
+                } else {
+                    current_swap_index += 1;
+                }
+            }
+
+            swap_index_pointer.set_value(current_swap_index);
+        }
 
         if remaining_nfts > 0 {
             return Err(anyhow!("Insufficient stored BEEP BOOP NFTs"));
         }
 
         Ok(tokens)
+    }
+
+    /// Check if an alkane ID represents an original BEEP BOOP NFT (not staked)
+    fn is_original(&self, id: &AlkaneId) -> Result<bool> {
+        let cp = Cellpack {
+            target: self.get_stake_contract_id(),
+            inputs: vec![STAKE_GET_ELIGIBILITY, id.block, id.tx],
+        };
+        let r = self.staticcall(&cp, &AlkaneTransferParcel::default(), self.fuel())?;
+        Ok(r.data.first().copied() == Some(1))
     }
 
     fn bytes_to_nft_id(&self, bytes: &[u8]) -> Result<AlkaneId> {
@@ -806,19 +859,24 @@ impl Claim {
         StoragePointer::from_keyword("/next-swap-index")
     }
 
-    /// Check if an alkane ID represents an original BEEP BOOP NFT (not staked)
-    fn is_original(&self, id: &AlkaneId) -> Result<bool> {
-        let cp = Cellpack {
-            target: self.get_stake_contract_id(),
-            inputs: vec![STAKE_GET_ELIGIBILITY, id.block, id.tx],
-        };
-        let r = self.staticcall(&cp, &AlkaneTransferParcel::default(), self.fuel())?;
-        Ok(r.data.first().copied() == Some(1))
+    /// Storage pointer for contract's stored BEEP BOOP tokens that have been used before (separate pool)
+    fn contract_used_beep_boop_tokens_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/contract-used-beep-boop-tokens")
+    }
+
+    /// Storage pointer for next deposit index in the used pool
+    fn used_deposit_index_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/next-used-deposit-index")
+    }
+
+    /// Storage pointer for next swap index in the used pool
+    fn used_next_swap_index_pointer(&self) -> StoragePointer {
+        StoragePointer::from_keyword("/next-used-swap-index")
     }
 }
 
 declare_alkane! {
-    impl AlkaneResponder for Claim {
-        type Message = ClaimMessage;
+    impl AlkaneResponder for BB {
+        type Message = BBMessage;
     }
 }
