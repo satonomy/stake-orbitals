@@ -11,6 +11,8 @@ use metashrew_support::index_pointer::KeyValuePointer;
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
+pub const BB_IMAGE: &[u8] = include_bytes!("./bb.png");
+
 const BEEP_BOOP_STAKE_CONTRACT_BLOCK: u128 = 2;
 const BEEP_BOOP_STAKE_CONTRACT_TX: u128 = 57751;
 const CONTRACT_NAME: &str = "BB";
@@ -121,6 +123,26 @@ enum BBMessage {
     #[opcode(513)]
     #[returns(String)]
     GetStoredBeepBoopAlkaneId { index: u128 },
+
+    /// Get the alkane ID of a used BEEP BOOP token by index
+    #[opcode(514)]
+    #[returns(String)]
+    GetUsedBeepBoopAlkaneId { index: u128 },
+
+    /// Get the current used deposit index (how many used tokens are stored)
+    #[opcode(515)]
+    #[returns(u128)]
+    GetUsedDepositIndex,
+
+    /// Get the current used swap index (next used token to be retrieved)
+    #[opcode(516)]
+    #[returns(u128)]
+    GetUsedSwapIndex,
+
+    /// Get data - default alkanes opcode for data retrieval
+    #[opcode(1000)]
+    #[returns(Vec<u8>)]
+    GetData,
 }
 
 impl Token for BB {
@@ -513,6 +535,47 @@ impl BB {
         Ok(response)
     }
 
+    pub fn get_used_beep_boop_alkane_id(&self, index: u128) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        let key_bytes = index.to_le_bytes().to_vec();
+        let token_data = self
+            .contract_used_beep_boop_tokens_pointer()
+            .select(&key_bytes)
+            .get();
+
+        if token_data.is_empty() {
+            return Err(anyhow!("No used BEEP BOOP token stored at index {}", index));
+        }
+
+        let token_id = self.bytes_to_nft_id(&token_data)?;
+        let identifier = format!("{}:{}", token_id.block, token_id.tx);
+        response.data = identifier.into_bytes();
+
+        Ok(response)
+    }
+
+    pub fn get_used_deposit_index(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        let used_deposit_index = self.used_deposit_index_pointer().get_value::<u128>();
+        response.data = used_deposit_index.to_le_bytes().to_vec();
+
+        Ok(response)
+    }
+
+    pub fn get_used_swap_index(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        let used_swap_index = self.used_next_swap_index_pointer().get_value::<u128>();
+        response.data = used_swap_index.to_le_bytes().to_vec();
+
+        Ok(response)
+    }
+
     fn calculate_total_rewards(&self, alkane_id: &AlkaneId, is_original: bool) -> Result<u128> {
         let total_staked_blocks = self
             .get_total_staked_blocks_from_contract(alkane_id)
@@ -820,6 +883,15 @@ impl BB {
         let tx = u128::from_le_bytes(bytes[16..32].try_into().unwrap());
 
         Ok(AlkaneId { block, tx })
+    }
+
+    pub fn get_data(&self) -> Result<CallResponse> {
+        let context = self.context()?;
+        let mut response = CallResponse::forward(&context.incoming_alkanes);
+
+        response.data = BB_IMAGE.to_vec();
+
+        Ok(response)
     }
 
     // Storage pointers
