@@ -22,7 +22,7 @@ const CONTRACT_NAME: &str = "BB";
 const CONTRACT_SYMBOL: &str = "🤖";
 
 // Swap rate: 25000 $BB = 1 BEEP BOOP
-const SWAP_RATE: u128 = 2_500_000_000_000;
+const MAX_CLAIM_PER_NFT: u128 = 2_500_000_000_000;
 
 // Reward scaling factor (8 decimal places)
 const REWARD_SCALE: u128 = 100_000_000;
@@ -264,7 +264,7 @@ impl BB {
             .get_value::<u128>();
 
         let earned_available = total_rewards.saturating_sub(claimed_amount);
-        let remaining_lifetime_limit = SWAP_RATE.saturating_sub(claimed_amount);
+        let remaining_lifetime_limit = MAX_CLAIM_PER_NFT.saturating_sub(claimed_amount);
         let available = earned_available.min(remaining_lifetime_limit);
         response.data = available.to_le_bytes().to_vec();
 
@@ -307,7 +307,7 @@ impl BB {
             }
 
             let earned_available = total_rewards.saturating_sub(previously_claimed);
-            let remaining_lifetime_limit = SWAP_RATE.saturating_sub(previously_claimed);
+            let remaining_lifetime_limit = MAX_CLAIM_PER_NFT.saturating_sub(previously_claimed);
             let available = earned_available.min(remaining_lifetime_limit);
 
             if available > 0 {
@@ -384,22 +384,22 @@ impl BB {
         }
 
         // Calculate how many complete BEEP BOOPs can be obtained
-        let beep_boop_amount = total_incoming_bb / SWAP_RATE;
+        let beep_boop_amount = total_incoming_bb / MAX_CLAIM_PER_NFT;
 
         // Calculate change (remaining $BB after swap)
-        let change_amount = total_incoming_bb % SWAP_RATE;
+        let change_amount = total_incoming_bb % MAX_CLAIM_PER_NFT;
 
         // Calculate actual $BB used for the swap
-        let bb_used_for_swap = beep_boop_amount * SWAP_RATE;
+        let bb_used_for_swap = beep_boop_amount * MAX_CLAIM_PER_NFT;
 
         if beep_boop_amount == 0 {
             return Err(anyhow!(
                 "Insufficient $BB tokens to swap for at least 1 BEEP BOOP (need at least {})",
-                SWAP_RATE
+                MAX_CLAIM_PER_NFT
             ));
         }
 
-        let contract_beep_boop_balance = self
+        let mut contract_beep_boop_balance = self
             .contract_beep_boop_balance_pointer()
             .get_value::<u128>();
         if contract_beep_boop_balance < beep_boop_amount {
@@ -413,9 +413,6 @@ impl BB {
 
         let beep_boop_tokens = self.retrieve_beep_boop_tokens_from_contract(beep_boop_amount)?;
 
-        let mut contract_beep_boop_balance = self
-            .contract_beep_boop_balance_pointer()
-            .get_value::<u128>();
         contract_beep_boop_balance -= beep_boop_amount;
         self.contract_beep_boop_balance_pointer()
             .set_value(contract_beep_boop_balance);
@@ -479,7 +476,7 @@ impl BB {
             }
         }
 
-        let bb_amount = total_incoming_beep_boop * SWAP_RATE;
+        let bb_amount = total_incoming_beep_boop * MAX_CLAIM_PER_NFT;
 
         for alkane in &context.incoming_alkanes.0 {
             if self.is_original(&alkane.id)? {
@@ -544,7 +541,7 @@ impl BB {
         }
 
         for alkane in &context.incoming_alkanes.0 {
-            self.store_beep_boop_token_in_contract(&alkane.id, alkane.value)?;
+            self.store_beep_boop_token_in_contract(&alkane.id)?;
             total_beep_boop_deposited += alkane.value;
         }
 
@@ -775,11 +772,11 @@ impl BB {
     pub fn get_value_per_mint(&self) -> Result<CallResponse> {
         let context = self.context()?;
         let mut response = CallResponse::forward(&context.incoming_alkanes);
-        response.data = SWAP_RATE.to_le_bytes().to_vec();
+        response.data = MAX_CLAIM_PER_NFT.to_le_bytes().to_vec();
         Ok(response)
     }
 
-    fn store_beep_boop_token_in_contract(&self, token_id: &AlkaneId, _value: u128) -> Result<()> {
+    fn store_beep_boop_token_in_contract(&self, token_id: &AlkaneId) -> Result<()> {
         let mut deposit_index_pointer = self.deposit_index_pointer();
         let current_deposit_index = deposit_index_pointer.get_value::<u128>();
 
