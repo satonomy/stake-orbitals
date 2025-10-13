@@ -19,7 +19,7 @@ pub const BB_IMAGE: &[u8] = include_bytes!("./bb.png");
 const BEEP_BOOP_BLOCK: u128 = 2;
 const BEEP_BOOP_STAKE_CONTRACT_TX: u128 = 57751;
 const CONTRACT_NAME: &str = "BB";
-const CONTRACT_SYMBOL: &str = "🤖";
+const CONTRACT_SYMBOL: &str = "BB";
 
 // Swap rate: 25000 $BB = 1 BEEP BOOP
 const MAX_CLAIM_PER_NFT: u128 = 2_500_000_000_000;
