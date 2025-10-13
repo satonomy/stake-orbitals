@@ -11,9 +11,12 @@ use metashrew_support::index_pointer::KeyValuePointer;
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
+mod orbitals_ids;
+use orbitals_ids::BEEP_BOOP_IDS;
+
 pub const BB_IMAGE: &[u8] = include_bytes!("./bb.png");
 
-const BEEP_BOOP_STAKE_CONTRACT_BLOCK: u128 = 2;
+const BEEP_BOOP_BLOCK: u128 = 2;
 const BEEP_BOOP_STAKE_CONTRACT_TX: u128 = 57751;
 const CONTRACT_NAME: &str = "BB";
 const CONTRACT_SYMBOL: &str = "🤖";
@@ -21,11 +24,12 @@ const CONTRACT_SYMBOL: &str = "🤖";
 // Swap rate: 25000 $BB = 1 BEEP BOOP
 const SWAP_RATE: u128 = 2_500_000_000_000;
 
+// Reward scaling factor (8 decimal places)
+const REWARD_SCALE: u128 = 100_000_000;
 // Token supply constants
 const MAX_SUPPLY: u128 = 25_000_000_000_000_000;
 
 // Stake contract opcodes that we need to call
-const STAKE_GET_ELIGIBILITY: u128 = 506;
 const STAKE_GET_STAKED_HEIGHT: u128 = 507;
 const STAKE_GET_STAKED_BY_LP: u128 = 508;
 const STAKE_GET_TOTAL_STAKED_BLOCKS: u128 = 510;
@@ -52,7 +56,7 @@ enum BBMessage {
     #[returns(String)]
     GetSymbol,
 
-    /// Get the total supply of claim contract tokens
+    /// Get the total supply of bb contract tokens
     #[opcode(101)]
     #[returns(u128)]
     GetTotalSupply,
@@ -89,7 +93,7 @@ enum BBMessage {
 
     /// BB available rewards for specific alkane IDs
     #[opcode(400)]
-    ClaimRewards,
+    ClaimRewards { amount: u128 },
 
     /// Get total amount claimed across all alkanes
     #[opcode(401)]
@@ -210,7 +214,11 @@ impl BB {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let alkane_id = AlkaneId { block, tx };
-        let original_nft_id = self.resolve_alkane_id(&alkane_id)?;
+        let original_nft_id = if self.is_original(&alkane_id)? {
+            alkane_id
+        } else {
+            self.get_original_nft_from_lp(&alkane_id)?
+        };
         let total_staked_blocks = self.get_total_staked_blocks_from_contract(&original_nft_id)?;
 
         response.data = total_staked_blocks.to_le_bytes().to_vec();
@@ -222,7 +230,11 @@ impl BB {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let alkane_id = AlkaneId { block, tx };
-        let original_nft_id = self.resolve_alkane_id(&alkane_id)?;
+        let original_nft_id = if self.is_original(&alkane_id)? {
+            alkane_id
+        } else {
+            self.get_original_nft_from_lp(&alkane_id)?
+        };
         let claimed_amount = self
             .claimed_amounts_pointer()
             .select(&self.alkane_id_to_bytes(&original_nft_id))
@@ -237,14 +249,18 @@ impl BB {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         let alkane_id = AlkaneId { block, tx };
-        let original_nft_id = self.resolve_alkane_id(&alkane_id)?;
+        let is_original = self.is_original(&alkane_id)?;
+        let original_id = if is_original {
+            alkane_id
+        } else {
+            self.get_original_nft_from_lp(&alkane_id)?
+        };
 
-        let is_original = original_nft_id == alkane_id;
+        let total_rewards = self.calculate_total_rewards(&original_id, is_original)?;
 
-        let total_rewards = self.calculate_total_rewards(&original_nft_id, is_original)?;
         let claimed_amount = self
             .claimed_amounts_pointer()
-            .select(&self.alkane_id_to_bytes(&original_nft_id))
+            .select(&self.alkane_id_to_bytes(&original_id))
             .get_value::<u128>();
 
         let earned_available = total_rewards.saturating_sub(claimed_amount);
@@ -255,18 +271,31 @@ impl BB {
         Ok(response)
     }
 
-    pub fn claim_rewards(&self) -> Result<CallResponse> {
+    pub fn claim_rewards(&self, amount: u128) -> Result<CallResponse> {
         let context = self.context()?;
 
         if context.incoming_alkanes.0.is_empty() {
             return Err(anyhow!("Must provide alkane IDs to claim rewards for"));
         }
 
+        if amount == 0 {
+            return Err(anyhow!("Amount must be greater than 0"));
+        }
+
         let mut total_claimed = 0u128;
+        let mut remaining_to_claim = amount;
 
         for alkane in &context.incoming_alkanes.0 {
-            let original_nft_id = self.resolve_alkane_id(&alkane.id)?;
-            let is_original = original_nft_id == alkane.id;
+            if remaining_to_claim == 0 {
+                break; // We've claimed the requested amount
+            }
+
+            let is_original = self.is_original(&alkane.id)?;
+            let original_nft_id = if is_original {
+                alkane.id
+            } else {
+                self.get_original_nft_from_lp(&alkane.id)?
+            };
             let total_rewards = self.calculate_total_rewards(&original_nft_id, is_original)?;
 
             let original_nft_bytes = self.alkane_id_to_bytes(&original_nft_id);
@@ -274,11 +303,7 @@ impl BB {
             let previously_claimed = claimed_pointer.get_value::<u128>();
 
             if total_rewards <= previously_claimed {
-                return Err(anyhow!(
-                    "No rewards available: claimed ({}) equals or exceeds total rewards ({})",
-                    previously_claimed,
-                    total_rewards
-                ));
+                continue; // Skip this alkane, no rewards available
             }
 
             let earned_available = total_rewards.saturating_sub(previously_claimed);
@@ -286,10 +311,21 @@ impl BB {
             let available = earned_available.min(remaining_lifetime_limit);
 
             if available > 0 {
-                let new_total_claimed = previously_claimed + available;
+                let to_claim_from_this = remaining_to_claim.min(available);
+                let new_total_claimed = previously_claimed + to_claim_from_this;
                 claimed_pointer.set_value(new_total_claimed);
-                total_claimed += available;
+                total_claimed += to_claim_from_this;
+                remaining_to_claim -= to_claim_from_this;
             }
+        }
+
+        // Check if we were able to claim the full requested amount
+        if remaining_to_claim > 0 {
+            return Err(anyhow!(
+                "Insufficient rewards available: requested {}, could only claim {}",
+                amount,
+                total_claimed
+            ));
         }
 
         let mut response = CallResponse::forward(&context.incoming_alkanes);
@@ -424,6 +460,23 @@ impl BB {
 
         if !has_original_token {
             return Err(anyhow!("No original BEEP BOOP tokens provided for swap"));
+        }
+
+        // Check that each BEEP BOOP token has staked at least 25,000 blocks
+        const MIN_STAKED_BLOCKS: u128 = 25_000;
+        for alkane in &context.incoming_alkanes.0 {
+            if self.is_original(&alkane.id)? {
+                let total_staked_blocks = self.get_total_staked_blocks_from_contract(&alkane.id)?;
+                if total_staked_blocks < MIN_STAKED_BLOCKS {
+                    return Err(anyhow!(
+                        "BEEP BOOP token {}:{} has only staked {} blocks, minimum required is {}",
+                        alkane.id.block,
+                        alkane.id.tx,
+                        total_staked_blocks,
+                        MIN_STAKED_BLOCKS
+                    ));
+                }
+            }
         }
 
         let bb_amount = total_incoming_beep_boop * SWAP_RATE;
@@ -576,19 +629,21 @@ impl BB {
         Ok(response)
     }
 
-    fn calculate_total_rewards(&self, alkane_id: &AlkaneId, is_original: bool) -> Result<u128> {
+    fn calculate_total_rewards(&self, original_id: &AlkaneId, is_original: bool) -> Result<u128> {
         let total_staked_blocks = self
-            .get_total_staked_blocks_from_contract(alkane_id)
+            .get_total_staked_blocks_from_contract(original_id)
             .unwrap_or(0);
 
         if is_original {
-            return Ok(total_staked_blocks);
+            // Scale the rewards by adding 8 zeros (multiply by 10^8)
+            return Ok(total_staked_blocks.saturating_mul(REWARD_SCALE));
         }
 
-        let current_staking_blocks = self.get_current_staking_period(alkane_id).unwrap_or(0);
+        let current_staking_blocks = self.get_current_staking_period(original_id).unwrap_or(0);
         let total_rewards = total_staked_blocks + current_staking_blocks;
 
-        Ok(total_rewards)
+        // Scale the rewards by adding 8 zeros (multiply by 10^8)
+        Ok(total_rewards.saturating_mul(REWARD_SCALE))
     }
 
     fn get_total_staked_blocks_from_contract(&self, alkane_id: &AlkaneId) -> Result<u128> {
@@ -666,7 +721,7 @@ impl BB {
 
     fn get_stake_contract_id(&self) -> AlkaneId {
         AlkaneId {
-            block: BEEP_BOOP_STAKE_CONTRACT_BLOCK,
+            block: BEEP_BOOP_BLOCK,
             tx: BEEP_BOOP_STAKE_CONTRACT_TX,
         }
     }
@@ -722,33 +777,6 @@ impl BB {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
         response.data = SWAP_RATE.to_le_bytes().to_vec();
         Ok(response)
-    }
-
-    fn resolve_alkane_id(&self, id: &AlkaneId) -> Result<AlkaneId> {
-        let stake_contract_id = self.get_stake_contract_id();
-
-        let cellpack = Cellpack {
-            target: stake_contract_id,
-            inputs: vec![STAKE_GET_ELIGIBILITY, id.block, id.tx],
-        };
-
-        let response =
-            match self.staticcall(&cellpack, &AlkaneTransferParcel::default(), self.fuel()) {
-                Ok(response) => response,
-                Err(_) => {
-                    // If eligibility check fails, try to get original NFT from LP
-                    return self.get_original_nft_from_lp(id);
-                }
-            };
-
-        if response.data.len() >= 1 {
-            let eligible = response.data[0];
-            if eligible == 1 {
-                return Ok(*id);
-            }
-        }
-
-        self.get_original_nft_from_lp(id)
     }
 
     fn store_beep_boop_token_in_contract(&self, token_id: &AlkaneId, _value: u128) -> Result<()> {
@@ -864,14 +892,12 @@ impl BB {
         Ok(tokens)
     }
 
-    /// Check if an alkane ID represents an original BEEP BOOP NFT (not staked)
+    pub fn verify_id_collection(&self, orbital_id: &AlkaneId) -> bool {
+        orbital_id.block == BEEP_BOOP_BLOCK && BEEP_BOOP_IDS.contains(&orbital_id.tx)
+    }
+
     fn is_original(&self, id: &AlkaneId) -> Result<bool> {
-        let cp = Cellpack {
-            target: self.get_stake_contract_id(),
-            inputs: vec![STAKE_GET_ELIGIBILITY, id.block, id.tx],
-        };
-        let r = self.staticcall(&cp, &AlkaneTransferParcel::default(), self.fuel())?;
-        Ok(r.data.first().copied() == Some(1))
+        Ok(self.verify_id_collection(id))
     }
 
     fn bytes_to_nft_id(&self, bytes: &[u8]) -> Result<AlkaneId> {
