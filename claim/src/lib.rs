@@ -24,6 +24,9 @@ const CONTRACT_SYMBOL: &str = "BB";
 // Swap rate: 25000 $BB = 1 BEEP BOOP
 const MAX_CLAIM_PER_NFT: u128 = 2_500_000_000_000;
 
+// Min staked blocks to actually swap the beep boop to bb
+const MIN_STAKED_BLOCKS: u128 = 25_000;
+
 // Reward scaling factor (8 decimal places)
 const REWARD_SCALE: u128 = 100_000_000;
 // Token supply constants
@@ -459,8 +462,6 @@ impl BB {
             return Err(anyhow!("No original BEEP BOOP tokens provided for swap"));
         }
 
-        // Check that each BEEP BOOP token has staked at least 25,000 blocks
-        const MIN_STAKED_BLOCKS: u128 = 25_000;
         for alkane in &context.incoming_alkanes.0 {
             if self.is_original(&alkane.id)? {
                 let total_staked_blocks = self.get_total_staked_blocks_from_contract(&alkane.id)?;
